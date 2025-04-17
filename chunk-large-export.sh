@@ -81,10 +81,37 @@ cat "$TEMP_DIR/settings.sql" > "$CURRENT_CHUNK"
 in_insert=0
 insert_buffer=""
 
+# Get file size and estimate processing time
+FILE_SIZE=$(du -h "$INPUT_FILE" | cut -f1)
+LINES_COUNT=$(wc -l < "$INPUT_FILE")
+# Estimate processing time (roughly 1000 lines per second as a baseline)
+ESTIMATED_SECONDS=$((LINES_COUNT / 1000))
+if [ $ESTIMATED_SECONDS -lt 1 ]; then
+  ESTIMATED_TIME="less than a second"
+elif [ $ESTIMATED_SECONDS -lt 60 ]; then
+  ESTIMATED_TIME="about $ESTIMATED_SECONDS seconds"
+else
+  ESTIMATED_MINUTES=$((ESTIMATED_SECONDS / 60))
+  ESTIMATED_TIME="about $ESTIMATED_MINUTES minutes"
+fi
+
 echo "Scanning file for INSERT statements..."
+echo "File size: $FILE_SIZE ($LINES_COUNT lines)"
+echo "Estimated processing time: $ESTIMATED_TIME"
+
+# Variables for progress tracking
+PROGRESS_INTERVAL=500  # Show progress every 500 lines
+CURRENT_LINE=0
 
 # Process the file line by line
 while IFS= read -r line; do
+    # Update progress indicator
+    CURRENT_LINE=$((CURRENT_LINE + 1))
+    if [ $((CURRENT_LINE % PROGRESS_INTERVAL)) -eq 0 ]; then
+        PROGRESS_PERCENT=$((CURRENT_LINE * 100 / LINES_COUNT))
+        printf "\rProgress: %d%% (%d/%d lines)" $PROGRESS_PERCENT $CURRENT_LINE $LINES_COUNT
+    fi
+
     # Check if line contains an INSERT statement (more flexible matching)
     if [[ "$line" =~ [Ii][Nn][Ss][Ee][Rr][Tt].[Ii][Nn][Tt][Oo] ]]; then
         # If we were already processing an INSERT, save it first
@@ -139,14 +166,14 @@ while IFS= read -r line; do
                 INSERT_COUNT=0
             fi
         fi
+    # If we're in the middle of an INSERT, keep accumulating the content
     elif [ $in_insert -eq 1 ]; then
-        # Continue adding to current INSERT statement
         insert_buffer="$insert_buffer
 $line"
 
-        # Check if this line ends the INSERT statement
+        # If the line ends with a semicolon, it's the end of the statement
         if [[ "$line" =~ \;$ ]]; then
-            # Apply REPLACE conversion if needed before saving
+            # Apply REPLACE conversion if needed
             if [ "$REPLACE_MODE" = true ]; then
                 insert_buffer=$(echo "$insert_buffer" | sed 's/[Ii][Nn][Ss][Ee][Rr][Tt].[Ii][Nn][Tt][Oo]/REPLACE INTO/g')
             fi
@@ -171,8 +198,11 @@ $line"
     fi
 done < "$INPUT_FILE"
 
-# Handle any remaining INSERT statement
-if [ $in_insert -eq 1 ] && [ ! -z "$insert_buffer" ]; then
+# Print a newline after progress indicator
+echo ""
+
+# Process any leftover INSERT
+if [ $in_insert -eq 1 ]; then
     # Apply REPLACE conversion if needed
     if [ "$REPLACE_MODE" = true ]; then
         insert_buffer=$(echo "$insert_buffer" | sed 's/[Ii][Nn][Ss][Ee][Rr][Tt].[Ii][Nn][Tt][Oo]/REPLACE INTO/g')
@@ -182,25 +212,35 @@ if [ $in_insert -eq 1 ] && [ ! -z "$insert_buffer" ]; then
     INSERT_COUNT=$((INSERT_COUNT + 1))
 fi
 
-# Add commit to the final chunk
-echo "COMMIT;" >> "$CURRENT_CHUNK"
+# Add final commit if there are any INSERTs in the last chunk
+if [ $INSERT_COUNT -gt 0 ]; then
+    echo "COMMIT;" >> "$CURRENT_CHUNK"
+    echo "Created chunk $FORMATTED_CHUNK_NUM with $INSERT_COUNT INSERT statements"
+fi
 
-echo "Created final chunk $FORMATTED_CHUNK_NUM with $INSERT_COUNT INSERT statements"
-echo "Total chunks created: $CHUNK_NUM"
-
-# Copy the files to the output directory
+# Create output directory if it doesn't exist
 mkdir -p "$CHUNKS_DIR"
-cp "$TEMP_DIR"/chunk_*.sql "$CHUNKS_DIR/"
-echo "All chunks copied to $CHUNKS_DIR directory"
 
-# Display import instructions using import-chunks.sh
-echo "Chunks have been created in the $CHUNKS_DIR directory."
-echo "To import these chunks, use the import-chunks.sh script:"
-echo "./import-chunks.sh -p $CHUNKS_DIR -u username -w password -n database_name"
-echo ""
-echo "For selective importing:"
-echo "./import-chunks.sh -p $CHUNKS_DIR -f 1 -t 5 -u username -w password -n database_name"
+# Create a shell script to execute all chunks
+EXEC_SCRIPT="$CHUNKS_DIR/execute_all.sh"
 
-# Clean up temporary files
-rm -rf "$TEMP_DIR"
-echo "Temporary files cleaned up"
+cat > "$EXEC_SCRIPT" << EOL
+#!/bin/bash
+
+# Execute all SQL chunks in numerical order
+for f in $CHUNKS_DIR/chunk_*.sql; do
+  echo "Processing \$f..."
+  mysql < "\$f"
+done
+EOL
+
+chmod +x "$EXEC_SCRIPT"
+
+# Move all chunks to output directory
+mv "$TEMP_DIR"/*.sql "$CHUNKS_DIR/"
+
+echo "Done! Created $(ls -1 "$CHUNKS_DIR"/chunk_*.sql | wc -l) chunks."
+echo "You can execute all chunks with: $EXEC_SCRIPT"
+
+# Clean up temp directory
+rmdir "$TEMP_DIR"
