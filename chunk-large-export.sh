@@ -27,6 +27,34 @@ debug_echo() {
   fi
 }
 
+# Function to process a complete insert statement
+process_complete_insert() {
+    # Increment counter
+    INSERT_COUNT=$((INSERT_COUNT + 1))
+
+    # Display progress periodically
+    if [ $((INSERT_COUNT % 10)) -eq 0 ]; then
+        PROGRESS_PERCENT=$((INSERT_COUNT * 100 / TOTAL_INSERTS))
+        printf "\rProcessed %d lines | Progress: %d%% (%d/%d inserts)" "$LINE_NUM" $PROGRESS_PERCENT $INSERT_COUNT $TOTAL_INSERTS
+        debug_echo "Progress update: $PROGRESS_PERCENT% ($INSERT_COUNT/$TOTAL_INSERTS inserts)"
+    fi
+
+    # Check if we need to start a new chunk
+    if [ $((INSERT_COUNT % CHUNK_SIZE)) -eq 0 ]; then
+        # Add footer to current chunk
+        echo -e "$SQL_FOOTER" >> "$CURRENT_CHUNK_FILE"
+        debug_echo "Completed chunk $CHUNK_NUM with $CHUNK_SIZE inserts"
+
+        # Start a new chunk
+        CHUNK_NUM=$((CHUNK_NUM + 1))
+        CURRENT_CHUNK_FILE="${CHUNKS_DIR}/chunk_$(printf "%02d" $CHUNK_NUM).sql"
+        debug_echo "Starting new chunk: $CURRENT_CHUNK_FILE"
+
+        # Add header to new chunk
+        echo -e "$SQL_HEADER" > "$CURRENT_CHUNK_FILE"
+    fi
+}
+
 # Parse command line arguments
 while [[ "$#" -gt 0 ]]; do
   case $1 in
@@ -71,7 +99,7 @@ debug_echo "SQL Footer: $SQL_FOOTER"
 
 echo "Processing SQL file in a single pass..."
 
-# Count total inserts first for progress reporting
+# Count total inserts for progress reporting
 echo "Counting INSERT statements (may take a moment for large files)..."
 TOTAL_INSERTS=$(grep -c -i "INSERT INTO" "$INPUT_FILE")
 echo "Found approximately $TOTAL_INSERTS INSERT statements"
@@ -94,9 +122,12 @@ debug_echo "Initial chunk file: $CURRENT_CHUNK_FILE"
 # Start with header for first chunk
 echo -e "$SQL_HEADER" > "$CURRENT_CHUNK_FILE"
 
-# Process the file line by line - much faster single-pass approach
+# Process the file to properly handle multi-line INSERT statements
 echo "Creating chunks..."
+IN_INSERT=false
+CURRENT_INSERT=""
 LINE_NUM=0
+
 while IFS= read -r line; do
     LINE_NUM=$((LINE_NUM + 1))
 
@@ -105,63 +136,86 @@ while IFS= read -r line; do
         debug_echo "Processing line $LINE_NUM"
     fi
 
-    # Check if it's an INSERT statement
-    if [[ "$line" =~ ^[[:space:]]*[Ii][Nn][Ss][Ee][Rr][Tt][[:space:]][Ii][Nn][Tt][Oo] ]]; then
-        debug_echo "Found INSERT at line $LINE_NUM: ${line:0:50}..."
+    # Display combined progress every 5000 lines if we haven't shown progress from an INSERT recently
+    if [ $((LINE_NUM % 5000)) -eq 0 ]; then
+        PROGRESS_PERCENT=$((INSERT_COUNT * 100 / TOTAL_INSERTS))
+        printf "\rProcessed %d lines | Progress: %d%% (%d/%d inserts)" "$LINE_NUM" $PROGRESS_PERCENT $INSERT_COUNT $TOTAL_INSERTS
+    fi
 
-        # Process INSERT statement
-        if [ "$REPLACE_MODE" = true ]; then
-            # Convert INSERT to REPLACE
-            line=$(echo "$line" | sed 's/[Ii][Nn][Ss][Ee][Rr][Tt][[:space:]][Ii][Nn][Tt][Oo]/REPLACE INTO/g')
-            debug_echo "Converted to REPLACE: ${line:0:50}..."
+    # Skip empty lines and comments when not in an INSERT
+    if [[ -z "$line" || "$line" =~ ^[[:space:]]*-- ]] && [ "$IN_INSERT" = false ]; then
+        continue
+    fi
+
+    # Check if this line starts a new INSERT statement
+    if [[ "$line" =~ ^[[:space:]]*[Ii][Nn][Ss][Ee][Rr][Tt][[:space:]][Ii][Nn][Tt][Oo] ]] && [ "$IN_INSERT" = false ]; then
+        debug_echo "Found INSERT start at line $LINE_NUM: ${line:0:50}..."
+        IN_INSERT=true
+        CURRENT_INSERT="$line"
+
+        # If this line also ends the INSERT statement
+        if [[ "$line" =~ \;[[:space:]]*$ ]]; then
+            debug_echo "Complete INSERT on single line: ${line:0:50}..."
+            IN_INSERT=false
+
+            # Process the INSERT statement
+            if [ "$REPLACE_MODE" = true ]; then
+                # Convert INSERT to REPLACE
+                CURRENT_INSERT=$(echo "$CURRENT_INSERT" | sed 's/[Ii][Nn][Ss][Ee][Rr][Tt][[:space:]][Ii][Nn][Tt][Oo]/REPLACE INTO/g')
+                debug_echo "Converted to REPLACE: ${CURRENT_INSERT:0:50}..."
+            fi
+
+            # Write to current chunk
+            echo "$CURRENT_INSERT" >> "$CURRENT_CHUNK_FILE"
+
+            # Increment counter and handle chunking
+            process_complete_insert
         fi
+    # Continue collecting the current INSERT statement
+    elif [ "$IN_INSERT" = true ]; then
+        CURRENT_INSERT="$CURRENT_INSERT"$'\n'"$line"
 
-        # Write to current chunk
-        echo "$line" >> "$CURRENT_CHUNK_FILE"
+        # Check if this line ends the INSERT statement
+        if [[ "$line" =~ \;[[:space:]]*$ ]]; then
+            debug_echo "Found INSERT end at line $LINE_NUM"
+            IN_INSERT=false
 
-        # Increment counter
-        INSERT_COUNT=$((INSERT_COUNT + 1))
+            # Process the INSERT statement
+            if [ "$REPLACE_MODE" = true ]; then
+                # Convert INSERT to REPLACE
+                CURRENT_INSERT=$(echo "$CURRENT_INSERT" | sed 's/[Ii][Nn][Ss][Ee][Rr][Tt][[:space:]][Ii][Nn][Tt][Oo]/REPLACE INTO/g')
+                debug_echo "Converted to REPLACE: ${CURRENT_INSERT:0:50}..."
+            fi
 
-        # Display progress periodically
-        if [ $((INSERT_COUNT % 50)) -eq 0 ]; then
-            PROGRESS_PERCENT=$((INSERT_COUNT * 100 / TOTAL_INSERTS))
-            printf "\rProgress: %d%% (%d/%d inserts)" $PROGRESS_PERCENT $INSERT_COUNT $TOTAL_INSERTS
-            debug_echo "Progress update: $PROGRESS_PERCENT% ($INSERT_COUNT/$TOTAL_INSERTS inserts)"
+            # Write to current chunk
+            echo "$CURRENT_INSERT" >> "$CURRENT_CHUNK_FILE"
+
+            # Increment counter and handle chunking
+            process_complete_insert
         fi
-
-        # Check if we need to start a new chunk
-        if [ $((INSERT_COUNT % CHUNK_SIZE)) -eq 0 ]; then
-            # Add footer to current chunk
-            echo -e "$SQL_FOOTER" >> "$CURRENT_CHUNK_FILE"
-            debug_echo "Completed chunk $CHUNK_NUM with $CHUNK_SIZE inserts"
-
-            # Start a new chunk
-            CHUNK_NUM=$((CHUNK_NUM + 1))
-            CURRENT_CHUNK_FILE="${CHUNKS_DIR}/chunk_$(printf "%02d" $CHUNK_NUM).sql"
-            debug_echo "Starting new chunk: $CURRENT_CHUNK_FILE"
-
-            # Add header to new chunk
-            echo -e "$SQL_HEADER" > "$CURRENT_CHUNK_FILE"
-        fi
-    # Check for LOCK/UNLOCK TABLES statements
+    # Handle LOCK/UNLOCK TABLES statements only (skip DROP, CREATE, ALTER)
     elif [[ "$line" =~ ^[[:space:]]*[Ll][Oo][Cc][Kk][[:space:]][Tt][Aa][Bb][Ll][Ee][Ss] ]]; then
         debug_echo "Found LOCK TABLES at line $LINE_NUM: $line"
         echo "$line" >> "$CURRENT_CHUNK_FILE"
     elif [[ "$line" =~ ^[[:space:]]*[Uu][Nn][Ll][Oo][Cc][Kk][[:space:]][Tt][Aa][Bb][Ll][Ee][Ss] ]]; then
         debug_echo "Found UNLOCK TABLES at line $LINE_NUM: $line"
         echo "$line" >> "$CURRENT_CHUNK_FILE"
-    # Include CREATE, ALTER, DROP and other important SQL statements
-    elif [[ "$line" =~ ^[[:space:]]*([Cc][Rr][Ee][Aa][Tt][Ee]|[Dd][Rr][Oo][Pp]|[Aa][Ll][Tt][Ee][Rr])[[:space:]] ]]; then
-        debug_echo "Found schema statement at line $LINE_NUM: ${line:0:50}..."
-        echo "$line" >> "$CURRENT_CHUNK_FILE"
     fi
 done < "$INPUT_FILE"
 
+# Clear the progress line
+printf "\r%-100s\r" " "
+
+# Check if we're still inside an INSERT at the end of the file
+if [ "$IN_INSERT" = true ]; then
+    echo "Warning: File ended while processing an INSERT statement. The last INSERT might be incomplete."
+fi
+
 # Additional check - if no inserts were actually processed
 if [ "$INSERT_COUNT" -eq 0 ]; then
-  echo "No INSERT statements were processed. Removing empty chunks and exiting."
-  rm -f "${CHUNKS_DIR}/chunk_"*.sql
-  exit 1
+    echo "No INSERT statements were processed. Removing empty chunks and exiting."
+    rm -f "${CHUNKS_DIR}/chunk_"*.sql
+    exit 1
 fi
 
 # Add footer to the last chunk
