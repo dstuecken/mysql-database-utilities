@@ -1,0 +1,50 @@
+# IDE and Editor Files
+#--------------------
+# JetBrains IDEs
+.idea/
+*.iml
+*.iws
+*.ipr
+.idea_modules/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Environment Variables and Secrets
+#---------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependency Directories
+#---------------------
+node_modules/
+vendor/
+bower_components/
+
+# Build and Compiled Output
+#------------------------
+dist/
+build/
+out/
+target/
+*.class
+*.jar
+*.war
+
+# Logs and Databases
+#-----------------
+*.log
+logs/
+*.sqlite
+*.db
+
+# OS Generated Files
+#-----------------
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini

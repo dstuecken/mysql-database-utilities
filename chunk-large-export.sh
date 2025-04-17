@@ -1,10 +1,6 @@
 #!/bin/bash
 
 # Default values
-DB_USER="root"
-DB_PASS=""
-DB_NAME=""
-DB_HOST=""  # Empty means use local socket
 CHUNK_SIZE=200  # Number of INSERT statements per chunk
 INPUT_FILE="dump.sql"  # Default input file
 REPLACE_MODE=false
@@ -15,10 +11,6 @@ usage() {
   echo "Usage: $0 [options]"
   echo "Options:"
   echo "  -r, --replace-into    Convert INSERT INTO statements to REPLACE INTO"
-  echo "  -u, --user USERNAME   Database username (default: root)"
-  echo "  -w, --password PASS   Database password (default: )"
-  echo "  -n, --database NAME   Database name (default: )"
-  echo "  -h, --host HOST       Database host (default: local socket)"
   echo "  -c, --chunk-size SIZE Number of INSERT statements per chunk (default: 200)"
   echo "  -i, --input FILE      Input SQL file to process (default: dump.sql)"
   echo "  -o, --output DIR      Output directory for chunks (default: ./chunks)"
@@ -30,10 +22,6 @@ usage() {
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     -r|--replace-into) REPLACE_MODE=true ;;
-    -u|--user) DB_USER="$2"; shift ;;
-    -w|--password) DB_PASS="$2"; shift ;;
-    -n|--database) DB_NAME="$2"; shift ;;
-    -h|--host) DB_HOST="$2"; shift ;;
     -c|--chunk-size) CHUNK_SIZE="$2"; shift ;;
     -i|--input) INPUT_FILE="$2"; shift ;;
     -o|--output) CHUNKS_DIR="$2"; shift ;;
@@ -53,7 +41,6 @@ if [ ! -f "$INPUT_FILE" ]; then
   exit 1
 fi
 
-echo "Database connection: ${DB_USER}@${DB_HOST:-localhost}/${DB_NAME}"
 echo "Chunk size: $CHUNK_SIZE INSERT statements per chunk"
 echo "Output directory: $CHUNKS_DIR"
 
@@ -206,13 +193,13 @@ mkdir -p "$CHUNKS_DIR"
 cp "$TEMP_DIR"/chunk_*.sql "$CHUNKS_DIR/"
 echo "All chunks copied to $CHUNKS_DIR directory"
 
-# Display import instructions
+# Display import instructions using import-chunks.sh
 echo "Chunks have been created in the $CHUNKS_DIR directory."
-if [ -z "$DB_HOST" ]; then
-    echo "To import later, run: for f in $CHUNKS_DIR/chunk_*.sql; do mysql -u$DB_USER -p$DB_PASS $DB_NAME < \$f; done"
-else
-    echo "To import later, run: for f in $CHUNKS_DIR/chunk_*.sql; do mysql -h$DB_HOST -u$DB_USER -p$DB_PASS $DB_NAME < \$f; done"
-fi
+echo "To import these chunks, use the import-chunks.sh script:"
+echo "./import-chunks.sh -p $CHUNKS_DIR -u username -w password -n database_name"
+echo ""
+echo "For selective importing:"
+echo "./import-chunks.sh -p $CHUNKS_DIR -f 1 -t 5 -u username -w password -n database_name"
 
 # Clean up temporary files
 rm -rf "$TEMP_DIR"
