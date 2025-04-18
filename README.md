@@ -6,7 +6,8 @@ A collection of bash scripts for efficiently exporting, chunking, and importing 
 This toolkit provides three main utilities:
 1. **export-database.sh** - Export MySQL databases with optimized settings, now with additional MySQL configuration options
 2. **chunk-large-export.sh** - Split large SQL dump files into manageable chunks
-3. **import-chunks.sh** - Import chunked SQL files with memory-efficient settings
+3. **import-chunks.sh** - Import chunked SQL files with memory-efficient settings1.
+4. **remove-super-statements-from-chunks.sh** - Process SQL chunk files to remove statements requiring SUPER privileges
 
 These scripts are particularly valuable when working with large databases that may cause memory issues or timeouts during standard import/export operations.
 
@@ -165,8 +166,49 @@ The `import-chunks.sh` script allows you to import chunked SQL files with memory
 ./import-chunks.sh -u dbadmin -w secret -n mydb -m 2147483648 -s 5
 ```
 
+### Remove SUPER Privilege Statements from Chunks
+The `remove-super-statements-from-chunks.sh` script processes SQL chunks to remove statements that require SUPER privileges, which often cause import failures on shared hosting environments.
+``` bash
+./remove-super-statements-from-chunks.sh --path ./chunks --output ./filtered_chunks
+```
+#### Options:
+- `-p, --path DIRECTORY` - Directory containing chunk files (default: ./chunks)
+- `-o, --output DIRECTORY` - Directory for processed files (default: ./chunks_nosuperprivs)
+- `-d, --dry-run` - Show what would be changed without actually writing files
+- `-v, --verbose` - Show detailed information about what is being processed
+- `--help` - Display help message
+
+#### What This Script Does:
+This script addresses a common issue where SQL import processes fail with errors like:
+``` 
+ERROR 1227 (42000) at line XX: Access denied; you need (at least one of) the SUPER privilege(s) for this operation
+```
+It identifies and removes statements requiring SUPER privileges, including:
+- `SET GLOBAL` statements
+- `SET @@GLOBAL` variable assignments
+- Plugin installation/uninstallation statements
+- User creation with special authentication methods
+
+The script preserves your original SQL chunk files by creating modified copies in the output directory, replacing removed statements with comments so you can see what was removed.
+#### Example Workflow:
+1. First remove SUPER privilege statements:
+``` bash
+   ./remove-super-statements-from-chunks.sh --path ./chunks --output ./filtered_chunks
+```
+1. Then import the filtered chunks:
+``` bash
+   ./import-chunks.sh --path ./filtered_chunks --database mydb --user dbuser --password dbpass
+```
+
 ## Advanced Usage
 For very large databases, you can use these tools in combination. First export the database, then chunk it if needed, and finally import the chunks with memory-optimized settings.
+
+## Requirements
+- Bash shell environment
+- MySQL/MariaDB client tools installed
+- Sufficient permissions on the MySQL server
+- Read/write access to the filesystem for the scripts
+
 
 ## Troubleshooting
 - If you encounter "Lock wait timeout" errors during export, try using `--skip-lock-tables`

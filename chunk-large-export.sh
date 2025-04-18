@@ -95,7 +95,7 @@ FILE_SIZE=$(du -h "$INPUT_FILE" | cut -f1)
 echo "File size: $FILE_SIZE"
 
 # Create SQL header with settings
-SQL_HEADER="SET foreign_key_checks=0;\nSET unique_checks=0;\nSET autocommit=0;\nSET GLOBAL max_allowed_packet=1073741824;\nSET GLOBAL innodb_flush_log_at_trx_commit=2;\nSET sql_log_bin=0;\n"
+SQL_HEADER="-- Created with https://github.com/dstuecken/mysql-database-utilities - $(date)\n"
 
 # Create SQL footer with commit
 SQL_FOOTER="\nCOMMIT;\nSET foreign_key_checks=1;\nSET unique_checks=1;\nSET autocommit=1;"
