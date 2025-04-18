@@ -17,7 +17,7 @@ usage() {
   echo "Usage: $0 [options]"
   echo "Options:"
   echo "  -u, --user USERNAME    Database username (default: root)"
-  echo "  -w, --password PASS    Database password (default: empty)"
+  echo "  -w, --password PASS    Database password (default: prompt)"
   echo "  -h, --host HOST        Database host (default: local socket)"
   echo "  -n, --database NAME    Database to import into (required)"
   echo "  -i, --input FILE       SQL file to import (required)"
@@ -70,53 +70,77 @@ fi
 FILE_SIZE=$(du -h "$INPUT_FILE" | cut -f1)
 echo "Input file: $INPUT_FILE (Size: $FILE_SIZE)"
 
-# Prepare MySQL connection options
-MYSQL_OPTS="-u\"$DB_USER\""
+# Prompt for password if not provided
+if [ -z "$DB_PASS" ]; then
+  echo -n "Enter password for MySQL user '$DB_USER': "
+  read -s DB_PASS
+  echo ""
+fi
 
+# Create password file for secure authentication
+MYSQL_PASS_FILE=""
 if [ -n "$DB_PASS" ]; then
-  MYSQL_OPTS+=" -p\"$DB_PASS\""
+  MYSQL_PASS_FILE=$(mktemp)
+  echo "[client]" > "$MYSQL_PASS_FILE"
+  echo "password=$DB_PASS" >> "$MYSQL_PASS_FILE"
+fi
+
+# Prepare MySQL connection options as an array for proper handling of arguments
+MYSQL_OPTS=()
+MYSQL_OPTS+=("-u$DB_USER")
+
+if [ -n "$MYSQL_PASS_FILE" ]; then
+  MYSQL_OPTS+=("--defaults-extra-file=$MYSQL_PASS_FILE")
 fi
 
 if [ -n "$DB_HOST" ]; then
-  MYSQL_OPTS+=" -h\"$DB_HOST\""
+  MYSQL_OPTS+=("-h$DB_HOST")
   CONNECTION_DESC="host '$DB_HOST'"
 else
   CONNECTION_DESC="local socket"
 fi
 
 # Check if database exists
-DB_EXISTS=$(mysql $MYSQL_OPTS -e "SHOW DATABASES LIKE '$DB_NAME'" 2>/dev/null | grep -c "$DB_NAME" || true)
+DB_EXISTS=$(mysql "${MYSQL_OPTS[@]}" -e "SHOW DATABASES LIKE '$DB_NAME'" 2>/dev/null | grep -c "$DB_NAME" || true)
 
 if [ "$DB_EXISTS" -gt 0 ] && [ "$FORCE" = false ]; then
   echo "Error: Database '$DB_NAME' already exists. Use --force to import anyway."
+  # Clean up password file
+  if [ -n "$MYSQL_PASS_FILE" ] && [ -f "$MYSQL_PASS_FILE" ]; then
+    rm -f "$MYSQL_PASS_FILE"
+  fi
   exit 1
 fi
 
 # Create database if it doesn't exist
 if [ "$DB_EXISTS" -eq 0 ]; then
   echo "Creating database '$DB_NAME'..."
-  mysql $MYSQL_OPTS -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\`" || {
+  mysql "${MYSQL_OPTS[@]}" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\`" || {
     echo "Error: Failed to create database '$DB_NAME'"
+    # Clean up password file
+    if [ -n "$MYSQL_PASS_FILE" ] && [ -f "$MYSQL_PASS_FILE" ]; then
+      rm -f "$MYSQL_PASS_FILE"
+    fi
     exit 1
   }
 fi
 
 # Build MySQL import command
-IMPORT_CMD="mysql $MYSQL_OPTS"
-IMPORT_CMD+=" --max_allowed_packet=$MAX_ALLOWED_PACKET"
-IMPORT_CMD+=" --net_buffer_length=$NET_BUFFER_LENGTH"
+IMPORT_OPTS=("${MYSQL_OPTS[@]}")
+IMPORT_OPTS+=("--max_allowed_packet=$MAX_ALLOWED_PACKET")
+IMPORT_OPTS+=("--net_buffer_length=$NET_BUFFER_LENGTH")
 
 if [ "$DISABLE_KEYS" = true ]; then
-  IMPORT_CMD+=" --disable-keys"
+  IMPORT_OPTS+=("--disable-keys")
 fi
 
 if [ "$SHOW_PROGRESS" = true ]; then
-  IMPORT_CMD+=" --show-warnings"
+  IMPORT_OPTS+=("--show-warnings")
 else
-  IMPORT_CMD+=" --silent"
+  IMPORT_OPTS+=("--silent")
 fi
 
-IMPORT_CMD+=" $DB_NAME"
+IMPORT_OPTS+=("$DB_NAME")
 
 # Show import information
 echo "Importing into database '$DB_NAME' on $CONNECTION_DESC as user '$DB_USER'"
@@ -129,8 +153,8 @@ fi
 
 # Prepare the import environment
 echo "Optimizing MySQL for import..."
-mysql $MYSQL_OPTS -e "SET GLOBAL max_allowed_packet=$MAX_ALLOWED_PACKET;" || echo "Warning: Could not set global max_allowed_packet"
-mysql $MYSQL_OPTS -e "SET GLOBAL net_buffer_length=$NET_BUFFER_LENGTH;" || echo "Warning: Could not set global net_buffer_length"
+mysql "${MYSQL_OPTS[@]}" -e "SET GLOBAL max_allowed_packet=$MAX_ALLOWED_PACKET;" || echo "Warning: Could not set global max_allowed_packet"
+mysql "${MYSQL_OPTS[@]}" -e "SET GLOBAL net_buffer_length=$NET_BUFFER_LENGTH;" || echo "Warning: Could not set global net_buffer_length"
 
 # Check if the file is gzipped
 if [[ "$INPUT_FILE" == *.gz ]]; then
@@ -140,14 +164,14 @@ if [[ "$INPUT_FILE" == *.gz ]]; then
   if [ "$SHOW_PROGRESS" = true ]; then
     # With progress reporting - using pv if available
     if command -v pv >/dev/null 2>&1; then
-      gunzip -c "$INPUT_FILE" | pv -s $(gzip -l "$INPUT_FILE" | sed -n 2p | awk '{print $2}') | eval "$IMPORT_CMD"
+      gunzip -c "$INPUT_FILE" | pv -s $(gzip -l "$INPUT_FILE" | sed -n 2p | awk '{print $2}') | mysql "${IMPORT_OPTS[@]}"
     else
       echo "Note: Install 'pv' for better progress reporting"
-      gunzip -c "$INPUT_FILE" | eval "$IMPORT_CMD"
+      gunzip -c "$INPUT_FILE" | mysql "${IMPORT_OPTS[@]}"
     fi
   else
     # Without progress reporting
-    gunzip -c "$INPUT_FILE" | eval "$IMPORT_CMD"
+    gunzip -c "$INPUT_FILE" | mysql "${IMPORT_OPTS[@]}"
   fi
 else
   echo "Starting import... This may take a while."
@@ -155,19 +179,27 @@ else
   if [ "$SHOW_PROGRESS" = true ]; then
     # With progress reporting - using pv if available
     if command -v pv >/dev/null 2>&1; then
-      pv "$INPUT_FILE" | eval "$IMPORT_CMD"
+      pv "$INPUT_FILE" | mysql "${IMPORT_OPTS[@]}"
     else
       echo "Note: Install 'pv' for better progress reporting"
-      eval "$IMPORT_CMD < \"$INPUT_FILE\""
+      mysql "${IMPORT_OPTS[@]}" < "$INPUT_FILE"
     fi
   else
     # Without progress reporting
-    eval "$IMPORT_CMD < \"$INPUT_FILE\""
+    mysql "${IMPORT_OPTS[@]}" < "$INPUT_FILE"
   fi
 fi
 
 # Check import result
-if [ $? -eq 0 ]; then
+IMPORT_STATUS=$?
+
+# Clean up password file
+if [ -n "$MYSQL_PASS_FILE" ] && [ -f "$MYSQL_PASS_FILE" ]; then
+  rm -f "$MYSQL_PASS_FILE"
+fi
+
+# Report on import result
+if [ $IMPORT_STATUS -eq 0 ]; then
   echo "Import completed successfully!"
 else
   echo "Error: Import failed."
@@ -176,6 +208,6 @@ fi
 
 # Reset MySQL optimization settings
 echo "Resetting MySQL optimization settings..."
-mysql $MYSQL_OPTS -e "FLUSH TABLES;" || echo "Warning: Could not flush tables"
+mysql "${MYSQL_OPTS[@]}" -e "FLUSH TABLES;" || echo "Warning: Could not flush tables"
 
 echo "Done."
