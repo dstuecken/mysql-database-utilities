@@ -11,6 +11,7 @@ NET_BUFFER_LENGTH="16384"  # Network buffer length
 SHOW_PROGRESS=true  # Whether to show progress information
 DISABLE_KEYS=true  # Whether to disable keys during import
 FORCE=false  # Force import even if database exists
+IGNORE_ERRORS=false  # Continue importing even when errors occur
 
 # Convert human-readable sizes to bytes
 convert_to_bytes() {
@@ -40,6 +41,7 @@ usage() {
   echo "  -b, --net-buffer SIZE  Network buffer length (default: 16384)"
   echo "  -k, --keep-keys        Don't disable keys during import (default: disable)"
   echo "  -f, --force            Force import even if database exists (default: false)"
+  echo "  --ignore-errors        Continue importing even when errors occur (uses --force flag on mysql)"
   echo "  -q, --quiet            Disable progress reporting"
   echo "  --help                 Display this help message"
   exit 1
@@ -62,6 +64,7 @@ while [[ "$#" -gt 0 ]]; do
     -k|--keep-keys) DISABLE_KEYS=false ;;
     -f|--force) FORCE=true ;;
     -q|--quiet) SHOW_PROGRESS=false ;;
+    --ignore-errors) IGNORE_ERRORS=true ;;
     --help) usage ;;
     *) echo "Unknown parameter: $1"; usage ;;
   esac
@@ -254,6 +257,12 @@ run_mysql_import() {
     cmd+=("--max_allowed_packet=$MAX_ALLOWED_PACKET")
     cmd+=("--net_buffer_length=$NET_BUFFER_LENGTH")
   fi
+
+  if [ "$IGNORE_ERRORS" = true ]; then
+    cmd+=("--force")
+    echo "Note: --ignore-errors option is enabled. MySQL will continue on errors."
+  fi
+
 
   if [ "$SHOW_PROGRESS" = false ]; then
     cmd+=("--silent")
