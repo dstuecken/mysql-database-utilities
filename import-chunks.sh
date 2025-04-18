@@ -85,8 +85,8 @@ if [ "$MOVE_IMPORTED" = true ]; then
   fi
 fi
 
-# Find all chunk files and sort them
-CHUNK_FILES=$(find "$CHUNKS_DIR" -name "chunk_*.sql" | sort)
+# Find all chunk files and sort them numerically based on chunk number
+CHUNK_FILES=$(find "$CHUNKS_DIR" -name "chunk_*.sql" | sort -V)
 TOTAL_CHUNKS=$(echo "$CHUNK_FILES" | wc -l)
 
 if [ "$TOTAL_CHUNKS" -eq 0 ]; then
@@ -100,6 +100,16 @@ echo "Found $TOTAL_CHUNKS chunk files in $CHUNKS_DIR"
 if [ "$TO_CHUNK" -eq 0 ]; then
   TO_CHUNK=$TOTAL_CHUNKS
 fi
+
+# Generate an array of chunk numbers in the correct order
+declare -a CHUNK_NUMBERS
+for CHUNK_FILE in $CHUNK_FILES; do
+  # Extract the chunk number from filename (between "chunk_" and ".sql")
+  CHUNK_NUM=$(basename "$CHUNK_FILE" | sed -E 's/chunk_([0-9]+)\.sql/\1/')
+  # Remove leading zeros
+  CHUNK_NUM=$((10#$CHUNK_NUM))
+  CHUNK_NUMBERS+=($CHUNK_NUM)
+done
 
 # Validate chunk range
 if [ "$FROM_CHUNK" -lt 1 ] || [ "$FROM_CHUNK" -gt "$TOTAL_CHUNKS" ]; then
@@ -120,116 +130,173 @@ else
 fi
 
 echo "Preparing to import chunks $FROM_CHUNK to $TO_CHUNK into database '$DB_NAME' on $CONNECTION_DESC as user '$DB_USER'"
-echo "Sleep between chunks: $SLEEP_SECONDS seconds"
+echo
 
-if [ "$MOVE_IMPORTED" = true ]; then
-  echo "Successfully imported chunks will be moved to: $COMPLETED_DIR"
+# Create MySQL connection parameters
+# Build the MySQL connection parameters
+MYSQL_PARAMS=()
+MYSQL_PARAMS+=("-u${DB_USER}")
+if [ -n "$DB_PASS" ]; then
+  MYSQL_PARAMS+=("-p${DB_PASS}")
 fi
+if [ -n "$DB_HOST" ]; then
+  MYSQL_PARAMS+=("-h${DB_HOST}")
+fi
+MYSQL_PARAMS+=("--max_allowed_packet=${MAX_PACKET}")
+MYSQL_PARAMS+=("${DB_NAME}")
 
-# Function to create MySQL command with appropriate host, user, password params
-create_mysql_command() {
-  local cmd="mysql"
+# Function to import a single chunk
+import_chunk() {
+  local chunk_num=$1
+  local chunk_file=$(printf "%s/chunk_%d.sql" "$CHUNKS_DIR" $chunk_num)
 
-  # Add host if specified
-  if [ -n "$DB_HOST" ]; then
-    cmd="$cmd -h\"$DB_HOST\""
+  # Skip if file doesn't exist
+  if [ ! -f "$chunk_file" ]; then
+    echo "Warning: Chunk file $chunk_file does not exist. Skipping."
+    return 1
   fi
 
-  # Add user
-  cmd="$cmd -u\"$DB_USER\""
-
-  # Add password if specified
-  if [ -n "$DB_PASS" ]; then
-    cmd="$cmd -p\"$DB_PASS\""
-  fi
-
-  echo "$cmd"
-}
-
-# Function to check if user has SUPER privileges
-check_super_privileges() {
-  local mysql_base_cmd=$(create_mysql_command)
-  local has_super=0
-
-  has_super=$(eval "$mysql_base_cmd -e \"SELECT COUNT(*) FROM information_schema.user_privileges WHERE GRANTEE LIKE CONCAT('''', SUBSTRING_INDEX(CURRENT_USER(), '@', 1), '''@%''') AND PRIVILEGE_TYPE = 'SUPER'\"" 2>/dev/null | grep -v "COUNT" | tr -d ' ' || echo "0")
-
-  if [ "$has_super" -gt 0 ]; then
-    return 0  # Success - has super privileges
+  # Execute import or show dry run information
+  if [ "$DRY_RUN" = true ]; then
+    # Just simulate import for dry run
+    sleep 1
+    echo "✅ Successfully simulated import of chunk $chunk_num (Dry Run)"
+    return 0
   else
-    return 1  # Failure - no super privileges
+    # Actually import the chunk - redirect stderr to a temporary file to capture errors
+    ERROR_FILE=$(mktemp)
+
+    if cat "$chunk_file" | mysql "${MYSQL_PARAMS[@]}" 2>"$ERROR_FILE"; then
+      # Move the file if requested and successful
+      if [ "$MOVE_IMPORTED" = true ]; then
+        mv "$chunk_file" "$COMPLETED_DIR/"
+        if [ $? -eq 0 ]; then
+          echo "✅ Successfully imported and moved chunk $chunk_num"
+        else
+          echo "✅ Successfully imported chunk $chunk_num (but move failed)"
+        fi
+      else
+        echo "✅ Successfully imported chunk $chunk_num"
+      fi
+
+      # Clean up error file
+      rm -f "$ERROR_FILE"
+      return 0
+    else
+      echo "❌ Failed to import chunk $chunk_num"
+      echo "MySQL Error Output:"
+      cat "$ERROR_FILE"
+
+      # Clean up error file
+      rm -f "$ERROR_FILE"
+
+      # Return the chunk number as exit code + 100 so we can extract it later
+      # (We add 100 to avoid confusion with standard exit codes)
+      return $((chunk_num + 100))
+    fi
   fi
 }
 
-# Check for SUPER privileges
-if check_super_privileges; then
-  echo "User has SUPER privileges - all statements will be executed"
-else
-  echo "Warning: User does not have SUPER privileges - some statements might fail"
-  echo "  Consider using remove-super-statements-from-chunks.sh script first"
-fi
+# Export function and variables for parallel
+export -f import_chunk
+export CHUNKS_DIR DB_USER DB_PASS DB_HOST DB_NAME MAX_PACKET DRY_RUN MOVE_IMPORTED COMPLETED_DIR
+export MYSQL_PARAMS
 
-# Import chunks
-CURRENT=0
-for chunk_file in $CHUNK_FILES; do
-  CURRENT=$((CURRENT + 1))
+# Calculate total chunks to import
+CHUNKS_TO_IMPORT=$((TO_CHUNK - FROM_CHUNK + 1))
 
-  # Skip chunks before FROM_CHUNK
-  if [ "$CURRENT" -lt "$FROM_CHUNK" ]; then
+# Serial processing
+CURRENT_CHUNK=0
+
+# Function to update progress display
+update_progress() {
+  local chunk_num=$1
+  local status=$2
+  printf "\rProcessing: %d%% (%d/%d chunks) | Current: chunk_%d.sql | Status: %s   " \
+    $(( (CURRENT_CHUNK) * 100 / CHUNKS_TO_IMPORT )) $CURRENT_CHUNK $CHUNKS_TO_IMPORT $chunk_num "$status"
+}
+
+SORTED_INDEX=0
+for CHUNK_NUM in "${CHUNK_NUMBERS[@]}"; do
+  SORTED_INDEX=$((SORTED_INDEX + 1))
+
+  # Skip chunks before FROM_CHUNK or after TO_CHUNK
+  if [ "$SORTED_INDEX" -lt "$FROM_CHUNK" ] || [ "$SORTED_INDEX" -gt "$TO_CHUNK" ]; then
     continue
   fi
 
-  # Stop if we've reached TO_CHUNK
-  if [ "$CURRENT" -gt "$TO_CHUNK" ]; then
-    break
+  CHUNK_FILE=$(printf "%s/chunk_%d.sql" "$CHUNKS_DIR" $CHUNK_NUM)
+
+  # Skip if file doesn't exist
+  if [ ! -f "$CHUNK_FILE" ]; then
+    echo "Warning: Chunk file $CHUNK_FILE does not exist. Skipping."
+    continue
   fi
 
-  echo "Importing chunk $CURRENT of $TO_CHUNK: $(basename "$chunk_file")"
+  CURRENT_CHUNK=$((CURRENT_CHUNK + 1))
+  SUCCESS=false
 
-  # Construct command to import the chunk
-  mysql_base_cmd=$(create_mysql_command)
-  IMPORT_CMD="$mysql_base_cmd --max_allowed_packet=$MAX_PACKET \"$DB_NAME\" < \"$chunk_file\""
+  # Update progress as "Processing"
+  update_progress $CHUNK_NUM "Processing"
 
-  # Execute the import unless dry run is enabled
+  # Execute import or show dry run information
   if [ "$DRY_RUN" = true ]; then
-    echo "Would execute: $IMPORT_CMD"
-    if [ "$MOVE_IMPORTED" = true ]; then
-      echo "Would move $(basename "$chunk_file") to $COMPLETED_DIR after successful import"
-    fi
+    # Just simulate import for dry run
+    sleep 1
+    update_progress $CHUNK_NUM "Simulated (Dry Run)"
+    echo -e "\n✅ Successfully simulated import of chunk $CHUNK_NUM (Dry Run)"
+    SUCCESS=true
   else
-    echo "Executing: $IMPORT_CMD"
-    eval "$IMPORT_CMD"
+    # Capture error output to a temporary file
+    ERROR_FILE=$(mktemp)
 
-    # Check the exit status
-    if [ $? -eq 0 ]; then
-      echo "Successfully imported chunk $CURRENT"
+    # Actually import the chunk
+    if cat "$CHUNK_FILE" | mysql "${MYSQL_PARAMS[@]}" 2>"$ERROR_FILE"; then
+      update_progress $CHUNK_NUM "Imported"
+      SUCCESS=true
 
-      # Move the file if requested
+      # Move the file if requested and successful
       if [ "$MOVE_IMPORTED" = true ]; then
-        echo "Moving $(basename "$chunk_file") to $COMPLETED_DIR"
-        mv "$chunk_file" "$COMPLETED_DIR/"
-        if [ $? -ne 0 ]; then
-          echo "Warning: Failed to move chunk file to $COMPLETED_DIR"
+        mv "$CHUNK_FILE" "$COMPLETED_DIR/"
+        if [ $? -eq 0 ]; then
+          update_progress $CHUNK_NUM "Imported & Moved"
+        else
+          update_progress $CHUNK_NUM "Imported (Move Failed)"
         fi
       fi
 
+      # Show success message on a new line
+      # echo -e "\n✅ Successfully imported chunk $CHUNK_NUM"
+
+      # Clean up error file
+      rm -f "$ERROR_FILE"
     else
-      echo "Error importing chunk $CURRENT"
-      echo "You may want to retry from this chunk: $0 --from $CURRENT --to $TO_CHUNK --user \"$DB_USER\" --password \"$DB_PASS\" --database \"$DB_NAME\" ${DB_HOST:+--host \"$DB_HOST\"} ${MOVE_IMPORTED:+--move-imported \"$COMPLETED_DIR\"}"
+      update_progress $CHUNK_NUM "FAILED"
+      # Clear the progress line before showing the error
+      echo -e "\n❌ Failed to import chunk $CHUNK_NUM"
+
+      # Display the MySQL error
+      echo "MySQL Error Output:"
+      cat "$ERROR_FILE"
+      echo ""
+
+      # Clean up error file
+      rm -f "$ERROR_FILE"
+
+      # Display retry message with all relevant parameters
+      echo "You may want to retry from this chunk: $0 --from $CHUNK_NUM --to $TO_CHUNK --user \"$DB_USER\" --password \"$DB_PASS\" --database \"$DB_NAME\" ${DB_HOST:+--host \"$DB_HOST\"} ${MOVE_IMPORTED:+--move-imported \"$COMPLETED_DIR\"}"
       exit 1
     fi
+  fi
 
-    # Sleep between chunks unless this is the last one
-    if [ "$CURRENT" -lt "$TO_CHUNK" ]; then
-      echo "Sleeping for $SLEEP_SECONDS seconds..."
-      sleep "$SLEEP_SECONDS"
-    fi
+  # Sleep between chunks if not the last chunk
+  if [ "$SORTED_INDEX" -lt "$TO_CHUNK" ]; then
+    sleep $SLEEP_SECONDS
   fi
 done
 
-if [ "$DRY_RUN" = true ]; then
-  echo "Dry run completed. No data was imported."
-else
-  echo "All chunks imported successfully!"
+# Final newline after progress display
+echo -e "\nImport completed successfully for $CURRENT_CHUNK chunks."
+if [ "$MOVE_IMPORTED" = true ]; then
+  echo "Imported chunks have been moved to: $COMPLETED_DIR"
 fi
-
-exit 0
