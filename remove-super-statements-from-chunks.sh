@@ -22,14 +22,14 @@ usage() {
 
 # Parse command line arguments
 while [[ "$#" -gt 0 ]]; do
-    case $1 in
+  case $1 in
     -p|--path) CHUNKS_DIR="$2"; shift ;;
--o|--output) OUTPUT_DIR="$2"; shift ;;
--d|--dry-run) DRY_RUN=true ;;
--v|--verbose) VERBOSE=true ;;
---help) usage ;;
-*) echo "Unknown parameter: $1"; usage ;;
-esac
+    -o|--output) OUTPUT_DIR="$2"; shift ;;
+    -d|--dry-run) DRY_RUN=true ;;
+    -v|--verbose) VERBOSE=true ;;
+    --help) usage ;;
+    *) echo "Unknown parameter: $1"; usage ;;
+  esac
   shift
 done
 
@@ -66,7 +66,7 @@ process_chunk() {
   # Create a temporary file for processing
   local temp_file=$(mktemp)
 
-if [ "$VERBOSE" = true ]; then
+  if [ "$VERBOSE" = true ]; then
     echo "Processing file: $chunk_file"
   fi
 
@@ -95,6 +95,9 @@ if [ "$VERBOSE" = true ]; then
       elif [[ "$line" =~ CREATE[[:space:]]+USER.+IDENTIFIED[[:space:]]+WITH[[:space:]]+'auth_socket' ]]; then
         in_super_statement=true
         skip_reason="CREATE USER with auth_socket"
+      elif [[ "$line" =~ SET[[:space:]]+sql_log_bin[[:space:]]*=[[:space:]]*0 ]]; then
+        in_super_statement=true
+        skip_reason="SET sql_log_bin"
       fi
     fi
 
@@ -112,8 +115,8 @@ if [ "$VERBOSE" = true ]; then
 
       lines_removed=$((lines_removed + 1))
 
-# Check if this line ends the statement
-if [[ "$line" =~ \;[[:space:]]*$ ]]; then
+      # Check if this line ends the statement
+      if [[ "$line" =~ \;[[:space:]]*$ ]]; then
         in_super_statement=false
         echo "-- End of removed statement" >> "$temp_file"
       fi
@@ -127,44 +130,39 @@ if [[ "$line" =~ \;[[:space:]]*$ ]]; then
 
   # If in dry run mode, just report what would happen
   if [ "$DRY_RUN" = true ]; then
-    if [ "$lines_removed" -gt 0 ]; then
-      echo "Would process $chunk_file and remove $lines_removed out of $lines_total lines"
-    else
-      echo "Would process $chunk_file (no SUPER privilege lines found)"
+    echo "Would write processed file to $output_file (removed $lines_removed of $lines_total lines)"
+    rm "$temp_file"
+  else
+    # Move the temp file to the final destination
+    mv "$temp_file" "$output_file"
+    if [ "$VERBOSE" = true ]; then
+      echo "Wrote processed file to $output_file (removed $lines_removed of $lines_total lines)"
     fi
-    rm -f "$temp_file"
-    return
-  fi
-
-  # Move the processed file to the output directory
-  mv "$temp_file" "$output_file"
-
-  if [ "$lines_removed" -gt 0 ]; then
-    echo "Processed $chunk_file -> $output_file (removed $lines_removed out of $lines_total lines)"
-  elif [ "$VERBOSE" = true ]; then
-    echo "Processed $chunk_file -> $output_file (no SUPER privilege lines found)"
   fi
 }
 
-# Counter for progress display
-CURRENT_CHUNK=0
-
 # Process each chunk file
+PROCESSED=0
 for chunk_file in $CHUNK_FILES; do
-    CURRENT_CHUNK=$((CURRENT_CHUNK + 1))
+  # Get the base filename without path
+  base_file=$(basename "$chunk_file")
+  # Create output path
+  output_file="$OUTPUT_DIR/$base_file"
 
-  # Get the basename of the file for the output
-  base_name=$(basename "$chunk_file")
-    output_file="$OUTPUT_DIR/$base_name"
+  # Process the chunk
+  process_chunk "$chunk_file" "$output_file"
 
-    echo -n "[$CURRENT_CHUNK/$TOTAL_CHUNKS] "
-    process_chunk "$chunk_file" "$output_file"
-    done
+  PROCESSED=$((PROCESSED + 1))
+  if [ "$VERBOSE" = false ] && [ "$((PROCESSED % 10))" -eq 0 ]; then
+    echo "Processed $PROCESSED of $TOTAL_CHUNKS files..."
+  fi
+done
 
-    if [ "$DRY_RUN" = true ]; then
-  echo "Dry run completed. No files were modified."
+echo "Completed processing $PROCESSED chunk files"
+if [ "$DRY_RUN" = true ]; then
+  echo "This was a dry run - no files were actually modified"
 else
-  echo "All chunks processed successfully! Modified files are in $OUTPUT_DIR"
+  echo "Processed files are available in $OUTPUT_DIR"
 fi
 
 exit 0

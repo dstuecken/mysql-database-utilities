@@ -86,45 +86,42 @@ fi
 
 # Check for conflicting options
 if [ "$STRUCTURE_ONLY" = true ] && [ "$DATA_ONLY" = true ]; then
-  echo "Error: You cannot use both --structure-only and --data-only options at the same time."
-  exit 1
-fi
-
-# Prompt for password if not provided
-if [ -z "$DB_PASS" ]; then
-  echo -n "Enter password for MySQL user '$DB_USER': "
-  read -s DB_PASS
-  echo ""
+  echo "Error: You cannot use both --structure-only and --data-only options."
+  usage
 fi
 
 # Create output directory if it doesn't exist
 mkdir -p "$OUTPUT_DIR"
 
-# Build mysqldump command with appropriate options
-DUMP_CMD="mysqldump -u\"$DB_USER\""
-
-# Use secure password file instead of command line parameter
-if [ -n "$DB_PASS" ]; then
-  MYSQL_PASS_FILE=$(mktemp)
-  echo "[client]" > "$MYSQL_PASS_FILE"
-  echo "password=\"$DB_PASS\"" >> "$MYSQL_PASS_FILE"
-  DUMP_CMD+=" --defaults-extra-file=\"$MYSQL_PASS_FILE\""
-fi
+# Create temporary file for MySQL password
+MYSQL_PASS_FILE=$(mktemp)
+trap 'rm -f "$MYSQL_PASS_FILE"' EXIT
+cat > "$MYSQL_PASS_FILE" << EOF
+[client]
+user=$DB_USER
+password=$DB_PASS
+EOF
 
 if [ -n "$DB_HOST" ]; then
-  DUMP_CMD+=" -h\"$DB_HOST\""
+  echo "host=$DB_HOST" >> "$MYSQL_PASS_FILE"
 fi
 
-# Add MySQL option flags to the dump command
+# Build the mysqldump command
+DUMP_CMD="mysqldump"
+# FIX: Use correct syntax for defaults-extra-file - with a space instead of equals sign
+DUMP_CMD+=" --defaults-extra-file \"$MYSQL_PASS_FILE\""
 DUMP_CMD+=" --max_allowed_packet=$MAX_ALLOWED_PACKET"
 DUMP_CMD+=" --net_buffer_length=$NET_BUFFER_LENGTH"
 
+# Add options based on user selection
 if [ "$SINGLE_TRANSACTION" = true ]; then
   DUMP_CMD+=" --single-transaction"
 fi
 
 if [ "$LOCK_TABLES" = true ]; then
-  DUMP_CMD+=" --lock-tables"
+  DUMP_CMD+=" --lock-tables=true"
+else
+  DUMP_CMD+=" --lock-tables=false"
 fi
 
 if [ "$SKIP_ADD_LOCKS" = true ]; then
@@ -151,68 +148,50 @@ if [ "$DATA_ONLY" = true ]; then
   DUMP_CMD+=" --no-create-info"
 fi
 
-# Add common export options
-DUMP_CMD+=" --opt --routines --events --triggers --create-options --extended-insert"
+# Progress indication
+if [ "$SHOW_PROGRESS" = true ]; then
+  # Add progress indicator options if supported
+  DUMP_CMD+=" --status"
+fi
 
-# Exclude tables if specified
+# Add excluded tables
 if [ -n "$EXCLUDE_TABLES" ]; then
-  IFS=',' read -r -a EXCLUDE_ARRAY <<< "$EXCLUDE_TABLES"
-  for TABLE in "${EXCLUDE_ARRAY[@]}"; do
-    DUMP_CMD+=" --ignore-table=$TABLE"
+  IFS=',' read -ra EXCLUDE_ARRAY <<< "$EXCLUDE_TABLES"
+  for table in "${EXCLUDE_ARRAY[@]}"; do
+    DUMP_CMD+=" --ignore-table=$table"
   done
 fi
 
-# Prepare database list
-IFS=',' read -r -a DB_ARRAY <<< "$DATABASES"
+# Process databases
+IFS=',' read -ra DB_ARRAY <<< "$DATABASES"
+for db in "${DB_ARRAY[@]}"; do
+  echo "Exporting database: $db"
 
-# Determine output path
-OUTPUT_PATH="$OUTPUT_DIR/$OUTPUT_FILE"
-
-# Show export information
-echo "Exporting database(s): ${DATABASES}"
-echo "Output file: $OUTPUT_PATH"
-
-if [ "$COMPRESS" = true ]; then
-  echo "Output will be compressed with gzip"
-  OUTPUT_PATH="${OUTPUT_PATH}.gz"
-fi
-
-# Perform the export
-if [ "$COMPRESS" = true ]; then
-  if [ "$SHOW_PROGRESS" = true ] && command -v pv >/dev/null 2>&1; then
-    eval "$DUMP_CMD ${DB_ARRAY[@]}" | pv | gzip > "$OUTPUT_PATH"
+  # Determine output filename
+  if [ "${#DB_ARRAY[@]}" -gt 1 ]; then
+    # Multiple databases, use database name as filename
+    CURRENT_OUTPUT_FILE="$OUTPUT_DIR/${db}.sql"
   else
-    eval "$DUMP_CMD ${DB_ARRAY[@]}" | gzip > "$OUTPUT_PATH"
+    # Single database, use the specified filename
+    CURRENT_OUTPUT_FILE="$OUTPUT_DIR/$OUTPUT_FILE"
   fi
-else
-  if [ "$SHOW_PROGRESS" = true ] && command -v pv >/dev/null 2>&1; then
-    eval "$DUMP_CMD ${DB_ARRAY[@]}" | pv > "$OUTPUT_PATH"
+
+  # Execute the dump command
+  FULL_CMD="$DUMP_CMD $db"
+
+  if [ "$COMPRESS" = true ]; then
+    echo "Exporting to: ${CURRENT_OUTPUT_FILE}.gz"
+    eval "$FULL_CMD | gzip > ${CURRENT_OUTPUT_FILE}.gz"
   else
-    eval "$DUMP_CMD ${DB_ARRAY[@]}" > "$OUTPUT_PATH"
+    echo "Exporting to: $CURRENT_OUTPUT_FILE"
+    eval "$FULL_CMD > $CURRENT_OUTPUT_FILE"
   fi
-fi
 
-# Check export result
-EXPORT_STATUS=$?
-
-# Clean up password file
-if [ -n "$MYSQL_PASS_FILE" ] && [ -f "$MYSQL_PASS_FILE" ]; then
-  rm -f "$MYSQL_PASS_FILE"
-fi
-
-# Report on export result
-if [ $EXPORT_STATUS -eq 0 ]; then
-  echo "Export completed successfully!"
-  echo "Exported to: $OUTPUT_PATH"
-
-  # Show file size information
-  if [ -f "$OUTPUT_PATH" ]; then
-    FILE_SIZE=$(du -h "$OUTPUT_PATH" | cut -f1)
-    echo "File size: $FILE_SIZE"
+  if [ $? -eq 0 ]; then
+    echo "Export of $db completed successfully."
+  else
+    echo "Error exporting $db. Exit code: $?"
   fi
-else
-  echo "Error: Export failed."
-  exit 1
-fi
+done
 
-echo "Done."
+echo "All database exports completed."
