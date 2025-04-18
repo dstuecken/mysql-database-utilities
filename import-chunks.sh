@@ -9,8 +9,10 @@ DB_USER="root"
 DB_PASS=""
 DB_NAME=""
 DB_HOST=""  # Empty means use local socket
-MAX_ALLOWED_PACKET="2073741824"  # ~2GB default
 SLEEP_SECONDS=3  # Sleep time between chunks
+MAX_PACKET="2073741824"  # Default max allowed packet size (2GB)
+MOVE_IMPORTED=false
+COMPLETED_DIR=""
 
 # Display usage instructions
 usage() {
@@ -26,9 +28,10 @@ usage() {
   echo "  -h, --host HOST       Database host (default: local socket)"
   echo "  -m, --max-packet SIZE Max allowed packet size in bytes (default: 2073741824)"
   echo "  -s, --sleep SECONDS   Sleep time between chunks in seconds (default: 3)"
+  echo "  --move-imported DIR   Move successfully imported chunks to specified directory"
   echo "  --help                Display this help message"
   echo ""
-  echo "Example: $0 --from 3 --to 7 --user dbadmin --password secret --database mydb --host dbserver"
+  echo "Example: $0 --from 3 --to 7 --user dbadmin --password secret --database mydb --host dbserver --move-imported ./completed"
   exit 1
 }
 
@@ -43,8 +46,9 @@ while [[ "$#" -gt 0 ]]; do
     -w|--password) DB_PASS="$2"; shift ;;
     -n|--database) DB_NAME="$2"; shift ;;
     -h|--host) DB_HOST="$2"; shift ;;
-    -m|--max-packet) MAX_ALLOWED_PACKET="$2"; shift ;;
+    -m|--max-packet) MAX_PACKET="$2"; shift ;;
     -s|--sleep) SLEEP_SECONDS="$2"; shift ;;
+    --move-imported) MOVE_IMPORTED=true; COMPLETED_DIR="$2"; shift ;;
     --help) usage ;;
     *) echo "Unknown parameter: $1"; usage ;;
   esac
@@ -55,6 +59,30 @@ done
 if [ ! -d "$CHUNKS_DIR" ]; then
   echo "Error: Chunks directory '$CHUNKS_DIR' does not exist."
   exit 1
+fi
+
+# Validate completed directory if move-imported is enabled
+if [ "$MOVE_IMPORTED" = true ]; then
+  if [ -z "$COMPLETED_DIR" ]; then
+    echo "Error: No directory specified for --move-imported option."
+    exit 1
+  fi
+
+  # Create the directory if it doesn't exist
+  if [ ! -d "$COMPLETED_DIR" ]; then
+    echo "Creating directory for completed chunks: $COMPLETED_DIR"
+    mkdir -p "$COMPLETED_DIR"
+    if [ $? -ne 0 ]; then
+      echo "Error: Failed to create directory '$COMPLETED_DIR'"
+      exit 1
+    fi
+  fi
+
+  # Check if the destination directory is writable
+  if [ ! -w "$COMPLETED_DIR" ]; then
+    echo "Error: Directory '$COMPLETED_DIR' is not writable."
+    exit 1
+  fi
 fi
 
 # Find all chunk files and sort them
@@ -84,27 +112,46 @@ if [ "$TO_CHUNK" -lt "$FROM_CHUNK" ] || [ "$TO_CHUNK" -gt "$TOTAL_CHUNKS" ]; the
   exit 1
 fi
 
-# Prepare connection string based on host setting
+# Set connection description based on host setting
 if [ -z "$DB_HOST" ]; then
-  HOST_PARAM=""
   CONNECTION_DESC="local socket"
 else
-  HOST_PARAM="-h\"$DB_HOST\""
   CONNECTION_DESC="host '$DB_HOST'"
 fi
 
 echo "Preparing to import chunks $FROM_CHUNK to $TO_CHUNK into database '$DB_NAME' on $CONNECTION_DESC as user '$DB_USER'"
 echo "Sleep between chunks: $SLEEP_SECONDS seconds"
 
+if [ "$MOVE_IMPORTED" = true ]; then
+  echo "Successfully imported chunks will be moved to: $COMPLETED_DIR"
+fi
+
+# Function to create MySQL command with appropriate host, user, password params
+create_mysql_command() {
+  local cmd="mysql"
+
+  # Add host if specified
+  if [ -n "$DB_HOST" ]; then
+    cmd="$cmd -h\"$DB_HOST\""
+  fi
+
+  # Add user
+  cmd="$cmd -u\"$DB_USER\""
+
+  # Add password if specified
+  if [ -n "$DB_PASS" ]; then
+    cmd="$cmd -p\"$DB_PASS\""
+  fi
+
+  echo "$cmd"
+}
+
 # Function to check if user has SUPER privileges
 check_super_privileges() {
+  local mysql_base_cmd=$(create_mysql_command)
   local has_super=0
 
-  if [ -z "$DB_HOST" ]; then
-    has_super=$(mysql -u"$DB_USER" ${DB_PASS:+-p"$DB_PASS"} -e "SELECT COUNT(*) FROM information_schema.user_privileges WHERE GRANTEE LIKE CONCAT('''', SUBSTRING_INDEX(CURRENT_USER(), '@', 1), '''@%''') AND PRIVILEGE_TYPE = 'SUPER'" 2>/dev/null | grep -v "COUNT" | tr -d ' ' || echo "0")
-  else
-    has_super=$(mysql -h"$DB_HOST" -u"$DB_USER" ${DB_PASS:+-p"$DB_PASS"} -e "SELECT COUNT(*) FROM information_schema.user_privileges WHERE GRANTEE LIKE CONCAT('''', SUBSTRING_INDEX(CURRENT_USER(), '@', 1), '''@%''') AND PRIVILEGE_TYPE = 'SUPER'" 2>/dev/null | grep -v "COUNT" | tr -d ' ' || echo "0")
-  fi
+  has_super=$(eval "$mysql_base_cmd -e \"SELECT COUNT(*) FROM information_schema.user_privileges WHERE GRANTEE LIKE CONCAT('''', SUBSTRING_INDEX(CURRENT_USER(), '@', 1), '''@%''') AND PRIVILEGE_TYPE = 'SUPER'\"" 2>/dev/null | grep -v "COUNT" | tr -d ' ' || echo "0")
 
   if [ "$has_super" -gt 0 ]; then
     return 0  # Success - has super privileges
@@ -114,184 +161,75 @@ check_super_privileges() {
 }
 
 # Check for SUPER privileges
-HAS_SUPER=false
 if check_super_privileges; then
-  HAS_SUPER=true
-  echo "User has SUPER privileges. Will execute commands requiring SUPER privileges."
+  echo "User has SUPER privileges - all statements will be executed"
 else
-  echo "User does not have SUPER privileges. Commands requiring SUPER privileges will be skipped."
+  echo "Warning: User does not have SUPER privileges - some statements might fail"
+  echo "  Consider using remove-super-statements-from-chunks.sh script first"
 fi
 
-# Function to clean up MySQL's memory usage
-clear_mysql_cache() {
-  if [ "$DRY_RUN" = true ]; then
-    echo "[DRY RUN] Would clear MySQL cache"
-    return
-  fi
-
-  if [ "$HAS_SUPER" = true ]; then
-    echo "Clearing MySQL cache to free memory..."
-    if [ -z "$DB_HOST" ]; then
-      mysql -u"$DB_USER" ${DB_PASS:+-p"$DB_PASS"} -e "FLUSH TABLES;" 2>/dev/null || true
-      # RESET QUERY CACHE is only available in older MySQL versions
-      mysql -u"$DB_USER" ${DB_PASS:+-p"$DB_PASS"} -e "RESET QUERY CACHE;" 2>/dev/null || true
-    else
-      mysql -h"$DB_HOST" -u"$DB_USER" ${DB_PASS:+-p"$DB_PASS"} -e "FLUSH TABLES;" 2>/dev/null || true
-      mysql -h"$DB_HOST" -u"$DB_USER" ${DB_PASS:+-p"$DB_PASS"} -e "RESET QUERY CACHE;" 2>/dev/null || true
-    fi
-  else
-    echo "Skipping cache clearing (requires SUPER privileges)"
-  fi
-}
-
-# Function to import a chunk file with proper settings
-import_chunk() {
-  local chunk_file="$1"
-  local chunk_num="$2"
-
-  echo "Importing chunk $chunk_num: $chunk_file"
-
-  if [ "$DRY_RUN" = true ]; then
-    echo "[DRY RUN] Would import $chunk_file"
-    return 0
-  fi
-
-  # Create a temporary file for the filtered SQL
-  local temp_sql=$(mktemp)
-
-  # Filter the SQL file based on user privileges
-  if [ "$HAS_SUPER" = true ]; then
-    # User has SUPER privileges, no need to filter
-    cp "$chunk_file" "$temp_sql"
-  else
-    # User doesn't have SUPER privileges, filter out commands requiring them
-    echo "Filtering SQL statements that require SUPER privileges..."
-
-    # Process the file line by line to properly handle multi-line statements
-    local in_global_statement=false
-    while IFS= read -r line || [ -n "$line" ]; do
-      # Skip empty lines or comments
-      if [[ -z "$line" || "$line" =~ ^[[:space:]]*-- ]]; then
-        echo "$line" >> "$temp_sql"
-        continue
-      fi
-
-      # Check if this line contains a statement requiring SUPER privileges
-      if [[ "$line" =~ (SET[[:space:]]+GLOBAL|SET[[:space:]]+@@GLOBAL) ]]; then
-        echo "  - Skipping line requiring SUPER privileges: $line"
-        in_global_statement=true
-        continue
-      fi
-
-      # If we're in a multi-line statement that requires SUPER, continue skipping
-      if [ "$in_global_statement" = true ]; then
-        # Check if this line ends the statement
-        if [[ "$line" =~ \;[[:space:]]*$ ]]; then
-          in_global_statement=false
-        fi
-        echo "  - Skipping continuation line: $line"
-        continue
-      fi
-
-      # This line doesn't require SUPER privileges, add it to the output
-      echo "$line" >> "$temp_sql"
-    done < "$chunk_file"
-  fi
-
-  # Build MySQL command
-  local mysql_cmd="mysql"
-
-  if [ -n "$DB_HOST" ]; then
-    mysql_cmd+=" -h\"$DB_HOST\""
-  fi
-
-  mysql_cmd+=" -u\"$DB_USER\""
-
-  if [ -n "$DB_PASS" ]; then
-    mysql_cmd+=" -p\"$DB_PASS\""
-  fi
-
-  if [ -n "$DB_NAME" ]; then
-    mysql_cmd+=" \"$DB_NAME\""
-  fi
-
-  # Import the filtered chunk file
-  echo "Executing SQL import..."
-  cat "$temp_sql" | eval $mysql_cmd
-  local import_status=$?
-
-  # Clean up temp file
-  rm -f "$temp_sql"
-
-  # Return the status of the import command
-  return $import_status
-}
-
-# Check if we're in dry run mode
-if [ "$DRY_RUN" = true ]; then
-  echo "[DRY RUN] No actual imports will be performed"
-fi
-
-# Count the chunks to process
-CHUNKS_TO_PROCESS=$((TO_CHUNK - FROM_CHUNK + 1))
-echo "Will process $CHUNKS_TO_PROCESS chunks"
-
-# Create a temp file for MySQL password
-if [ -n "$DB_PASS" ]; then
-  MYSQL_DEFAULTS_FILE=$(mktemp)
-  echo "[client]" > "$MYSQL_DEFAULTS_FILE"
-  echo "password=$DB_PASS" >> "$MYSQL_DEFAULTS_FILE"
-  chmod 600 "$MYSQL_DEFAULTS_FILE"
-  MYSQL_AUTH="--defaults-extra-file=$MYSQL_DEFAULTS_FILE"
-else
-  MYSQL_AUTH=""
-fi
-
-# Process each chunk file
-CURRENT_CHUNK=0
+# Import chunks
+CURRENT=0
 for chunk_file in $CHUNK_FILES; do
-  CURRENT_CHUNK=$((CURRENT_CHUNK + 1))
+  CURRENT=$((CURRENT + 1))
 
   # Skip chunks before FROM_CHUNK
-  if [ "$CURRENT_CHUNK" -lt "$FROM_CHUNK" ]; then
+  if [ "$CURRENT" -lt "$FROM_CHUNK" ]; then
     continue
   fi
 
-  # Stop after TO_CHUNK
-  if [ "$CURRENT_CHUNK" -gt "$TO_CHUNK" ]; then
+  # Stop if we've reached TO_CHUNK
+  if [ "$CURRENT" -gt "$TO_CHUNK" ]; then
     break
   fi
 
-  # Get chunk number from filename
-  CHUNK_NUM=$(basename "$chunk_file" | sed -E 's/chunk_([0-9]+)\.sql/\1/')
+  echo "Importing chunk $CURRENT of $TO_CHUNK: $(basename "$chunk_file")"
 
-  echo "--- Processing chunk $CURRENT_CHUNK of $CHUNKS_TO_PROCESS (file: $chunk_file) ---"
+  # Construct command to import the chunk
+  mysql_base_cmd=$(create_mysql_command)
+  IMPORT_CMD="$mysql_base_cmd --max_allowed_packet=$MAX_PACKET \"$DB_NAME\" < \"$chunk_file\""
 
-  # Import the chunk
-  if import_chunk "$chunk_file" "$CHUNK_NUM"; then
-    echo "Chunk $CHUNK_NUM imported successfully"
-  else
-    echo "ERROR: Failed to import chunk $CHUNK_NUM"
-    if [ -n "$MYSQL_DEFAULTS_FILE" ] && [ -f "$MYSQL_DEFAULTS_FILE" ]; then
-      rm -f "$MYSQL_DEFAULTS_FILE"
+  # Execute the import unless dry run is enabled
+  if [ "$DRY_RUN" = true ]; then
+    echo "Would execute: $IMPORT_CMD"
+    if [ "$MOVE_IMPORTED" = true ]; then
+      echo "Would move $(basename "$chunk_file") to $COMPLETED_DIR after successful import"
     fi
-    exit 1
-  fi
+  else
+    echo "Executing: $IMPORT_CMD"
+    eval "$IMPORT_CMD"
 
-  # Clear cache to free memory
-  clear_mysql_cache
+    # Check the exit status
+    if [ $? -eq 0 ]; then
+      echo "Successfully imported chunk $CURRENT"
 
-  # Sleep between chunks if not the last one
-  if [ "$CURRENT_CHUNK" -lt "$TO_CHUNK" ]; then
-    echo "Sleeping for $SLEEP_SECONDS seconds before next chunk..."
-    sleep "$SLEEP_SECONDS"
+      # Move the file if requested
+      if [ "$MOVE_IMPORTED" = true ]; then
+        echo "Moving $(basename "$chunk_file") to $COMPLETED_DIR"
+        mv "$chunk_file" "$COMPLETED_DIR/"
+        if [ $? -ne 0 ]; then
+          echo "Warning: Failed to move chunk file to $COMPLETED_DIR"
+        fi
+      fi
+
+    else
+      echo "Error importing chunk $CURRENT"
+      echo "You may want to retry from this chunk: $0 --from $CURRENT --to $TO_CHUNK --user \"$DB_USER\" --password \"$DB_PASS\" --database \"$DB_NAME\" ${DB_HOST:+--host \"$DB_HOST\"} ${MOVE_IMPORTED:+--move-imported \"$COMPLETED_DIR\"}"
+      exit 1
+    fi
+
+    # Sleep between chunks unless this is the last one
+    if [ "$CURRENT" -lt "$TO_CHUNK" ]; then
+      echo "Sleeping for $SLEEP_SECONDS seconds..."
+      sleep "$SLEEP_SECONDS"
+    fi
   fi
 done
 
-# Clean up temp file
-if [ -n "$MYSQL_DEFAULTS_FILE" ] && [ -f "$MYSQL_DEFAULTS_FILE" ]; then
-  rm -f "$MYSQL_DEFAULTS_FILE"
+if [ "$DRY_RUN" = true ]; then
+  echo "Dry run completed. No data was imported."
+else
+  echo "All chunks imported successfully!"
 fi
 
-echo "All chunks imported successfully!"
 exit 0
