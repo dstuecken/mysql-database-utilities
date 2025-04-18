@@ -6,11 +6,26 @@ DB_PASS=""
 DB_HOST=""  # Empty means use local socket
 DB_NAME=""  # Database to import into
 INPUT_FILE=""  # SQL file to import
-MAX_ALLOWED_PACKET="1G"  # Maximum allowed packet size
+MAX_ALLOWED_PACKET="1073741824"  # 1GB in bytes
 NET_BUFFER_LENGTH="16384"  # Network buffer length
 SHOW_PROGRESS=true  # Whether to show progress information
 DISABLE_KEYS=true  # Whether to disable keys during import
 FORCE=false  # Force import even if database exists
+
+# Convert human-readable sizes to bytes
+convert_to_bytes() {
+  local size=$1
+  local value=${size%[KMGTkmgt]*}
+  local unit=${size##*[0-9]}
+
+  case $unit in
+    [Kk]) echo $((value * 1024)) ;;
+    [Mm]) echo $((value * 1024 * 1024)) ;;
+    [Gg]) echo $((value * 1024 * 1024 * 1024)) ;;
+    [Tt]) echo $((value * 1024 * 1024 * 1024 * 1024)) ;;
+    *) echo $value ;;  # Assume it's already in bytes if no unit
+  esac
+}
 
 # Display usage instructions
 usage() {
@@ -38,8 +53,12 @@ while [[ "$#" -gt 0 ]]; do
     -h|--host) DB_HOST="$2"; shift ;;
     -n|--database) DB_NAME="$2"; shift ;;
     -i|--input) INPUT_FILE="$2"; shift ;;
-    -m|--max-packet) MAX_ALLOWED_PACKET="$2"; shift ;;
-    -b|--net-buffer) NET_BUFFER_LENGTH="$2"; shift ;;
+    -m|--max-packet)
+      MAX_ALLOWED_PACKET=$(convert_to_bytes "$2")
+      shift ;;
+    -b|--net-buffer)
+      NET_BUFFER_LENGTH=$(convert_to_bytes "$2")
+      shift ;;
     -k|--keep-keys) DISABLE_KEYS=false ;;
     -f|--force) FORCE=true ;;
     -q|--quiet) SHOW_PROGRESS=false ;;
@@ -75,6 +94,15 @@ if [ -z "$DB_PASS" ]; then
   echo -n "Enter password for MySQL user '$DB_USER': "
   read -s DB_PASS
   echo ""
+fi
+
+# Create password file for secure authentication
+MYSQL_PASS_FILE=""
+if [ -n "$DB_PASS" ]; then
+  MYSQL_PASS_FILE=$(mktemp)
+  echo "[client]" > "$MYSQL_PASS_FILE"
+  echo "password=$DB_PASS" >> "$MYSQL_PASS_FILE"
+  chmod 600 "$MYSQL_PASS_FILE"  # Set proper permissions
 fi
 
 # Function to run MySQL commands with proper authentication
@@ -113,19 +141,22 @@ run_mysql_command() {
   fi
 }
 
-# Create password file for secure authentication
-MYSQL_PASS_FILE=""
-if [ -n "$DB_PASS" ]; then
-  MYSQL_PASS_FILE=$(mktemp)
-  echo "[client]" > "$MYSQL_PASS_FILE"
-  echo "password=$DB_PASS" >> "$MYSQL_PASS_FILE"
-  chmod 600 "$MYSQL_PASS_FILE"  # Set proper permissions
-fi
-
 if [ -n "$DB_HOST" ]; then
   CONNECTION_DESC="host '$DB_HOST'"
 else
   CONNECTION_DESC="local socket"
+fi
+
+# Check user privileges
+echo "Checking privileges for user '$DB_USER'..."
+HAS_SUPER_PRIVILEGE=$(run_mysql_command "" -e "SELECT IF(COUNT(*) > 0, 'YES', 'NO') AS has_super FROM information_schema.user_privileges WHERE GRANTEE LIKE '%''$DB_USER''%' AND PRIVILEGE_TYPE = 'SUPER'" 2>/dev/null | grep -v "has_super" | grep -v "row" | tr -d ' ')
+
+if [ "$HAS_SUPER_PRIVILEGE" = "YES" ]; then
+  echo "User has SUPER privileges. Global settings can be modified."
+  CAN_MODIFY_GLOBALS=true
+else
+  echo "User does not have SUPER privileges. Will not attempt to modify MySQL variables."
+  CAN_MODIFY_GLOBALS=false
 fi
 
 # Check if database exists
@@ -140,8 +171,20 @@ if [ "$DB_EXISTS" -gt 0 ] && [ "$FORCE" = false ]; then
   exit 1
 fi
 
-# Create database if it doesn't exist
+# Check if the user has privileges to create a database
 if [ "$DB_EXISTS" -eq 0 ]; then
+  echo "Checking if user can create database..."
+  CAN_CREATE_DB=$(run_mysql_command "" -e "SHOW GRANTS" 2>/dev/null | grep -E "ALL PRIVILEGES|CREATE" | grep -c "." || true)
+
+  if [ "$CAN_CREATE_DB" -eq 0 ]; then
+    echo "Error: User '$DB_USER' does not have permission to create database '$DB_NAME'."
+    # Clean up password file
+    if [ -n "$MYSQL_PASS_FILE" ] && [ -f "$MYSQL_PASS_FILE" ]; then
+      rm -f "$MYSQL_PASS_FILE"
+    fi
+    exit 1
+  fi
+
   echo "Creating database '$DB_NAME'..."
   run_mysql_command "" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\`" || {
     echo "Error: Failed to create database '$DB_NAME'"
@@ -155,17 +198,40 @@ fi
 
 # Show import information
 echo "Importing into database '$DB_NAME' on $CONNECTION_DESC as user '$DB_USER'"
-echo "Using max_allowed_packet: $MAX_ALLOWED_PACKET"
-echo "Using net_buffer_length: $NET_BUFFER_LENGTH"
+
+# Only try to set packet size if we have SUPER privileges
+if [ "$CAN_MODIFY_GLOBALS" = true ]; then
+  echo "Using max_allowed_packet: $MAX_ALLOWED_PACKET bytes"
+  echo "Using net_buffer_length: $NET_BUFFER_LENGTH bytes"
+fi
 
 if [ "$DISABLE_KEYS" = true ]; then
-  echo "Keys will be disabled during import"
+  echo "Keys will be temporarily disabled during import"
 fi
 
 # Prepare the import environment
-echo "Optimizing MySQL for import..."
-run_mysql_command "" -e "SET GLOBAL max_allowed_packet=$MAX_ALLOWED_PACKET;" || echo "Warning: Could not set global max_allowed_packet"
-run_mysql_command "" -e "SET GLOBAL net_buffer_length=$NET_BUFFER_LENGTH;" || echo "Warning: Could not set global net_buffer_length"
+if [ "$CAN_MODIFY_GLOBALS" = true ]; then
+  echo "Optimizing MySQL for import..."
+  run_mysql_command "" -e "SET GLOBAL max_allowed_packet=$MAX_ALLOWED_PACKET;" || echo "Warning: Could not set global max_allowed_packet"
+  run_mysql_command "" -e "SET GLOBAL net_buffer_length=$NET_BUFFER_LENGTH;" || echo "Warning: Could not set global net_buffer_length"
+fi
+
+# If disabling keys, prepare the command
+if [ "$DISABLE_KEYS" = true ] && [ "$DB_EXISTS" -gt 0 ]; then
+  # Check if the user has ALTER privilege
+  CAN_ALTER=$(run_mysql_command "" -e "SHOW GRANTS" 2>/dev/null | grep -E "ALL PRIVILEGES|ALTER" | grep -c "." || true)
+
+  if [ "$CAN_ALTER" -gt 0 ]; then
+    echo "Disabling keys on existing tables..."
+    TABLES=$(run_mysql_command "$DB_NAME" -e "SHOW TABLES\G" | grep -v "Tables_in" | grep -v "row" | tr -d ' ' | tr -d '*')
+    for TABLE in $TABLES; do
+      run_mysql_command "$DB_NAME" -e "ALTER TABLE \`$TABLE\` DISABLE KEYS;" || echo "Warning: Could not disable keys for table $TABLE"
+    done
+  else
+    echo "Warning: User does not have ALTER privilege. Cannot disable keys on existing tables."
+    DISABLE_KEYS=false
+  fi
+fi
 
 # Build MySQL import command function
 run_mysql_import() {
@@ -183,17 +249,13 @@ run_mysql_import() {
     cmd+=("-h$DB_HOST")
   fi
 
-  # Add import-specific options
-  cmd+=("--max_allowed_packet=$MAX_ALLOWED_PACKET")
-  cmd+=("--net_buffer_length=$NET_BUFFER_LENGTH")
-
-  if [ "$DISABLE_KEYS" = true ]; then
-    cmd+=("--disable-keys")
+  # Add max_allowed_packet directly to command line if we have SUPER privileges
+  if [ "$CAN_MODIFY_GLOBALS" = true ]; then
+    cmd+=("--max_allowed_packet=$MAX_ALLOWED_PACKET")
+    cmd+=("--net_buffer_length=$NET_BUFFER_LENGTH")
   fi
 
-  if [ "$SHOW_PROGRESS" = true ]; then
-    cmd+=("--show-warnings")
-  else
+  if [ "$SHOW_PROGRESS" = false ]; then
     cmd+=("--silent")
   fi
 
@@ -204,6 +266,15 @@ run_mysql_import() {
   mysql "${cmd[@]}"
 }
 
+# Prepare the SQL commands
+SET_VARS_SQL=""
+if [ "$DISABLE_KEYS" = true ]; then
+  SET_VARS_SQL="${SET_VARS_SQL}SET FOREIGN_KEY_CHECKS=0;\n"
+  RESET_VARS_SQL="SET FOREIGN_KEY_CHECKS=1;\n"
+else
+  RESET_VARS_SQL=""
+fi
+
 # Check if the file is gzipped
 if [[ "$INPUT_FILE" == *.gz ]]; then
   echo "Detected gzipped SQL file, extracting during import..."
@@ -212,14 +283,15 @@ if [[ "$INPUT_FILE" == *.gz ]]; then
   if [ "$SHOW_PROGRESS" = true ]; then
     # With progress reporting - using pv if available
     if command -v pv >/dev/null 2>&1; then
-      gunzip -c "$INPUT_FILE" | pv -s $(gzip -l "$INPUT_FILE" | sed -n 2p | awk '{print $2}') | run_mysql_import
+      (echo -e "$SET_VARS_SQL"; gunzip -c "$INPUT_FILE"; echo -e "$RESET_VARS_SQL") | \
+      pv -s $(($(gzip -l "$INPUT_FILE" | sed -n 2p | awk '{print $2}')+100)) | run_mysql_import
     else
       echo "Note: Install 'pv' for better progress reporting"
-      gunzip -c "$INPUT_FILE" | run_mysql_import
+      (echo -e "$SET_VARS_SQL"; gunzip -c "$INPUT_FILE"; echo -e "$RESET_VARS_SQL") | run_mysql_import
     fi
   else
     # Without progress reporting
-    gunzip -c "$INPUT_FILE" | run_mysql_import
+    (echo -e "$SET_VARS_SQL"; gunzip -c "$INPUT_FILE"; echo -e "$RESET_VARS_SQL") | run_mysql_import
   fi
 else
   echo "Starting import... This may take a while."
@@ -227,19 +299,29 @@ else
   if [ "$SHOW_PROGRESS" = true ]; then
     # With progress reporting - using pv if available
     if command -v pv >/dev/null 2>&1; then
-      pv "$INPUT_FILE" | run_mysql_import
+      (echo -e "$SET_VARS_SQL"; cat "$INPUT_FILE"; echo -e "$RESET_VARS_SQL") | \
+      pv -s $(($(stat -f%z "$INPUT_FILE" 2>/dev/null || stat -c%s "$INPUT_FILE")+100)) | run_mysql_import
     else
       echo "Note: Install 'pv' for better progress reporting"
-      run_mysql_import < "$INPUT_FILE"
+      (echo -e "$SET_VARS_SQL"; cat "$INPUT_FILE"; echo -e "$RESET_VARS_SQL") | run_mysql_import
     fi
   else
     # Without progress reporting
-    run_mysql_import < "$INPUT_FILE"
+    (echo -e "$SET_VARS_SQL"; cat "$INPUT_FILE"; echo -e "$RESET_VARS_SQL") | run_mysql_import
   fi
 fi
 
 # Check import result
 IMPORT_STATUS=$?
+
+# If disabling keys was enabled, re-enable the keys
+if [ "$DISABLE_KEYS" = true ] && [ "$DB_EXISTS" -gt 0 ] && [ "$CAN_ALTER" -gt 0 ]; then
+  echo "Re-enabling keys on tables..."
+  TABLES=$(run_mysql_command "$DB_NAME" -e "SHOW TABLES\G" | grep -v "Tables_in" | grep -v "row" | tr -d ' ' | tr -d '*')
+  for TABLE in $TABLES; do
+    run_mysql_command "$DB_NAME" -e "ALTER TABLE \`$TABLE\` ENABLE KEYS;" || echo "Warning: Could not enable keys for table $TABLE"
+  done
+fi
 
 # Clean up password file
 if [ -n "$MYSQL_PASS_FILE" ] && [ -f "$MYSQL_PASS_FILE" ]; then
@@ -255,7 +337,9 @@ else
 fi
 
 # Reset MySQL optimization settings
-echo "Resetting MySQL optimization settings..."
-run_mysql_command "" -e "FLUSH TABLES;" || echo "Warning: Could not flush tables"
+if [ "$CAN_MODIFY_GLOBALS" = true ]; then
+  echo "Resetting MySQL optimization settings..."
+  run_mysql_command "" -e "FLUSH TABLES;" || echo "Warning: Could not flush tables"
+fi
 
 echo "Done."
