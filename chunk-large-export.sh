@@ -6,6 +6,7 @@ INPUT_FILE="dump.sql"  # Default input file
 REPLACE_MODE=false
 CHUNKS_DIR="./chunks"  # Default output directory
 DEBUG_MODE=false
+STRUCTURE_FILE=""  # File to store structure (CREATE TABLE statements)
 
 # Display usage instructions
 usage() {
@@ -15,6 +16,7 @@ usage() {
   echo "  -c, --chunk-size SIZE Number of INSERT statements per chunk (default: 200)"
   echo "  -i, --input FILE      Input SQL file to process (default: dump.sql)"
   echo "  -o, --output DIR      Output directory for chunks (default: ./chunks)"
+  echo "  -s, --structure FILE  Extract CREATE TABLE statements to specified file"
   echo "  -d, --debug           Enable debug mode with verbose output"
   echo "  --help                Display this help message"
   exit 1
@@ -62,6 +64,7 @@ while [[ "$#" -gt 0 ]]; do
     -c|--chunk-size) CHUNK_SIZE="$2"; shift ;;
     -i|--input) INPUT_FILE="$2"; shift ;;
     -o|--output) CHUNKS_DIR="$2"; shift ;;
+    -s|--structure) STRUCTURE_FILE="$2"; shift ;;
     -d|--debug) DEBUG_MODE=true ;;
     --help) usage ;;
     *) echo "Unknown parameter: $1"; usage ;;
@@ -77,6 +80,9 @@ fi
 
 echo "Chunk size: $CHUNK_SIZE INSERT statements per chunk"
 echo "Output directory: $CHUNKS_DIR"
+if [ -n "$STRUCTURE_FILE" ]; then
+  echo "Structure output file: $STRUCTURE_FILE"
+fi
 if [ "$DEBUG_MODE" = true ]; then
   echo "Debug mode: ENABLED"
 fi
@@ -96,6 +102,45 @@ SQL_FOOTER="\nCOMMIT;\nSET foreign_key_checks=1;\nSET unique_checks=1;\nSET auto
 
 debug_echo "SQL Header: $SQL_HEADER"
 debug_echo "SQL Footer: $SQL_FOOTER"
+
+# Extract CREATE TABLE statements if structure file is specified
+if [ -n "$STRUCTURE_FILE" ]; then
+  echo "Extracting structure to $STRUCTURE_FILE..."
+
+  # Create structure file with header
+  echo -e "$SQL_HEADER" > "$STRUCTURE_FILE"
+
+  # Extract CREATE TABLE statements and append to structure file
+  grep -n "^CREATE TABLE" "$INPUT_FILE" | while IFS=':' read -r line_num line_content; do
+    debug_echo "Found CREATE TABLE at line $line_num"
+
+    # Initialize variables for multi-line capture
+    create_statement="$line_content"
+    current_line=$((line_num + 1))
+
+    # Continue reading until we find the closing semicolon
+    while true; do
+      next_line=$(sed -n "${current_line}p" "$INPUT_FILE")
+      create_statement="$create_statement"$'\n'"$next_line"
+
+      # If this line has a semicolon, we're done with this CREATE TABLE
+      if [[ "$next_line" == *";"* ]]; then
+        break
+      fi
+
+      current_line=$((current_line + 1))
+    done
+
+    # Add the complete CREATE TABLE statement to the structure file
+    echo "$create_statement" >> "$STRUCTURE_FILE"
+    echo "" >> "$STRUCTURE_FILE"  # Add a newline for readability
+  done
+
+  # Add footer to structure file
+  echo -e "$SQL_FOOTER" >> "$STRUCTURE_FILE"
+
+  echo "Structure extraction completed."
+fi
 
 echo "Processing SQL file in a single pass..."
 
@@ -122,106 +167,90 @@ debug_echo "Initial chunk file: $CURRENT_CHUNK_FILE"
 # Start with header for first chunk
 echo -e "$SQL_HEADER" > "$CURRENT_CHUNK_FILE"
 
-# Process the file to properly handle multi-line INSERT statements
-echo "Creating chunks..."
+# Process the file to extract INSERT statements and apply chunking
+LINE_NUM=0
 IN_INSERT=false
 CURRENT_INSERT=""
-LINE_NUM=0
 
+# Process the file line by line
 while IFS= read -r line; do
     LINE_NUM=$((LINE_NUM + 1))
 
-    # Debug every Nth line to avoid excessive output
-    if [ "$DEBUG_MODE" = true ] && [ $((LINE_NUM % 1000)) -eq 0 ]; then
-        debug_echo "Processing line $LINE_NUM"
-    fi
-
-    # Display combined progress every 5000 lines if we haven't shown progress from an INSERT recently
-    if [ $((LINE_NUM % 5000)) -eq 0 ]; then
-        PROGRESS_PERCENT=$((INSERT_COUNT * 100 / TOTAL_INSERTS))
-        printf "\rProcessed %d lines | Progress: %d%% (%d/%d inserts)" "$LINE_NUM" $PROGRESS_PERCENT $INSERT_COUNT $TOTAL_INSERTS
-    fi
-
-    # Skip empty lines and comments when not in an INSERT
-    if [[ -z "$line" || "$line" =~ ^[[:space:]]*-- ]] && [ "$IN_INSERT" = false ]; then
+    # Skip structure lines if they're part of a CREATE TABLE statement (already extracted)
+    if [[ "$line" == "CREATE TABLE "* ]] && [ -n "$STRUCTURE_FILE" ]; then
+        debug_echo "Skipping CREATE TABLE at line $LINE_NUM (already extracted)"
+        # Skip until we find a line ending with semicolon
+        while IFS= read -r create_line; do
+            LINE_NUM=$((LINE_NUM + 1))
+            if [[ "$create_line" == *";"* ]]; then
+                break
+            fi
+        done
         continue
     fi
 
-    # Check if this line starts a new INSERT statement
-    if [[ "$line" =~ ^[[:space:]]*[Ii][Nn][Ss][Ee][Rr][Tt][[:space:]][Ii][Nn][Tt][Oo] ]] && [ "$IN_INSERT" = false ]; then
-        debug_echo "Found INSERT start at line $LINE_NUM: ${line:0:50}..."
+    # Check if this is the start of an INSERT statement
+    if [[ "$line" == "INSERT INTO "* ]] || [ "$REPLACE_MODE" = true ] && [[ "$line" == "REPLACE INTO "* ]]; then
+        # If we were already processing an INSERT statement, process the completed one
+        if [ "$IN_INSERT" = true ]; then
+            # Add the complete INSERT to the current chunk
+            echo "$CURRENT_INSERT" >> "$CURRENT_CHUNK_FILE"
+            process_complete_insert
+        fi
+
+        # Start a new INSERT
         IN_INSERT=true
+
+        # Replace INSERT INTO with REPLACE INTO if requested
+        if [ "$REPLACE_MODE" = true ] && [[ "$line" == "INSERT INTO "* ]]; then
+            line="${line/INSERT INTO/REPLACE INTO}"
+            debug_echo "Converted INSERT to REPLACE at line $LINE_NUM"
+        fi
+
         CURRENT_INSERT="$line"
 
-        # If this line also ends the INSERT statement
-        if [[ "$line" =~ \;[[:space:]]*$ ]]; then
-            debug_echo "Complete INSERT on single line: ${line:0:50}..."
-            IN_INSERT=false
-
-            # Process the INSERT statement
-            if [ "$REPLACE_MODE" = true ]; then
-                # Convert INSERT to REPLACE
-                CURRENT_INSERT=$(echo "$CURRENT_INSERT" | sed 's/[Ii][Nn][Ss][Ee][Rr][Tt][[:space:]][Ii][Nn][Tt][Oo]/REPLACE INTO/g')
-                debug_echo "Converted to REPLACE: ${CURRENT_INSERT:0:50}..."
-            fi
-
-            # Write to current chunk
+        # If INSERT is complete (ends with semicolon), process it immediately
+        if [[ "$line" == *";"* ]]; then
+            # Add the complete INSERT to the current chunk
             echo "$CURRENT_INSERT" >> "$CURRENT_CHUNK_FILE"
-
-            # Increment counter and handle chunking
             process_complete_insert
+            IN_INSERT=false
+            CURRENT_INSERT=""
         fi
-    # Continue collecting the current INSERT statement
     elif [ "$IN_INSERT" = true ]; then
+        # Continue building the current INSERT statement
         CURRENT_INSERT="$CURRENT_INSERT"$'\n'"$line"
 
-        # Check if this line ends the INSERT statement
-        if [[ "$line" =~ \;[[:space:]]*$ ]]; then
-            debug_echo "Found INSERT end at line $LINE_NUM"
-            IN_INSERT=false
-
-            # Process the INSERT statement
-            if [ "$REPLACE_MODE" = true ]; then
-                # Convert INSERT to REPLACE
-                CURRENT_INSERT=$(echo "$CURRENT_INSERT" | sed 's/[Ii][Nn][Ss][Ee][Rr][Tt][[:space:]][Ii][Nn][Tt][Oo]/REPLACE INTO/g')
-                debug_echo "Converted to REPLACE: ${CURRENT_INSERT:0:50}..."
-            fi
-
-            # Write to current chunk
+        # If we've reached the end of the INSERT (semicolon), process it
+        if [[ "$line" == *";"* ]]; then
+            # Add the complete INSERT to the current chunk
             echo "$CURRENT_INSERT" >> "$CURRENT_CHUNK_FILE"
-
-            # Increment counter and handle chunking
             process_complete_insert
+            IN_INSERT=false
+            CURRENT_INSERT=""
         fi
-    # Handle LOCK/UNLOCK TABLES statements only (skip DROP, CREATE, ALTER)
-    elif [[ "$line" =~ ^[[:space:]]*[Ll][Oo][Cc][Kk][[:space:]][Tt][Aa][Bb][Ll][Ee][Ss] ]]; then
-        debug_echo "Found LOCK TABLES at line $LINE_NUM: $line"
-        echo "$line" >> "$CURRENT_CHUNK_FILE"
-    elif [[ "$line" =~ ^[[:space:]]*[Uu][Nn][Ll][Oo][Cc][Kk][[:space:]][Tt][Aa][Bb][Ll][Ee][Ss] ]]; then
-        debug_echo "Found UNLOCK TABLES at line $LINE_NUM: $line"
-        echo "$line" >> "$CURRENT_CHUNK_FILE"
     fi
+
+    # Display progress periodically based on line count
+    if [ $((LINE_NUM % 10000)) -eq 0 ]; then
+        debug_echo "Processed $LINE_NUM lines"
+    fi
+
 done < "$INPUT_FILE"
 
-# Clear the progress line
-printf "\r%-100s\r" " "
-
-# Check if we're still inside an INSERT at the end of the file
+# Process any remaining INSERT statement
 if [ "$IN_INSERT" = true ]; then
-    echo "Warning: File ended while processing an INSERT statement. The last INSERT might be incomplete."
+    echo "$CURRENT_INSERT" >> "$CURRENT_CHUNK_FILE"
+    process_complete_insert
 fi
 
-# Additional check - if no inserts were actually processed
-if [ "$INSERT_COUNT" -eq 0 ]; then
-    echo "No INSERT statements were processed. Removing empty chunks and exiting."
-    rm -f "${CHUNKS_DIR}/chunk_"*.sql
-    exit 1
-fi
-
-# Add footer to the last chunk
+# Add footer to final chunk
 echo -e "$SQL_FOOTER" >> "$CURRENT_CHUNK_FILE"
-debug_echo "Added footer to final chunk $CHUNK_NUM"
 
-echo -e "\nFinished processing $INSERT_COUNT INSERT statements into $CHUNK_NUM chunks"
-debug_echo "Final statistics: $INSERT_COUNT inserts, $CHUNK_NUM chunks, $LINE_NUM total lines processed"
-echo "Done! Chunks are available in $CHUNKS_DIR/"
+echo ""  # New line after progress indicator
+echo "Processing complete!"
+echo "Created $CHUNK_NUM chunks in $CHUNKS_DIR"
+if [ -n "$STRUCTURE_FILE" ]; then
+    echo "Structure definitions saved to $STRUCTURE_FILE"
+fi
+echo "Total INSERT statements processed: $INSERT_COUNT"

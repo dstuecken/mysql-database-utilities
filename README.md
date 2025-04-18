@@ -48,6 +48,11 @@ The `export-database.sh` script allows you to export one or more MySQL databases
 - `--no-create-info` - Skip table creation information
 - `--skip-lock-tables` - Skip locking tables during export (use if you get error: 1109)
 - `--no-tablespaces` - Skip tablespace information
+- `--column-statistics=0` - Disable column statistics (helps with MySQL 8+ exports)
+- `--skip-triggers` - Exclude triggers from the export
+- `--no-data` - Export only structure, no data
+- `--routines` - Include stored routines (procedures and functions)
+- `--events` - Include events
 - `--help` - Display help message
 
 #### Examples:
@@ -60,13 +65,16 @@ The `export-database.sh` script allows you to export one or more MySQL databases
 
 # Export database without locks for read-only databases
 ./export-database.sh -u dbadmin -w secure123 -d readonly_db --skip-add-locks --skip-lock-tables
+
+# Export only structure (no data) including stored routines
+./export-database.sh -u dbadmin -w secure123 -d database --no-data --routines
 ```
 
 ### Chunk Large Export
-The `chunk-large-export.sh` script splits a large SQL dump file into smaller manageable chunks to facilitate easier importing, especially for very large databases.
+The `chunk-large-export.sh` script splits a large SQL dump file into smaller manageable chunks to facilitate easier importing, especially for very large databases. It can also now extract CREATE TABLE statements to a separate structure file.
 
 ```bash
-./chunk-large-export.sh -i large_dump.sql -c 500 -o ./chunks
+./chunk-large-export.sh -i large_dump.sql -c 500 -o ./chunks -s structure.sql
 ```
 
 #### Options:
@@ -74,13 +82,20 @@ The `chunk-large-export.sh` script splits a large SQL dump file into smaller man
 - `-c, --chunk-size SIZE` - Number of INSERT statements per chunk (default: 200)
 - `-i, --input FILE` - Input SQL file to process (default: dump.sql)
 - `-o, --output DIR` - Output directory for chunks (default: ./chunks)
+- `-s, --structure FILE` - Extract CREATE TABLE statements to specified file
 - `-d, --debug` - Enable debug mode with verbose output
 - `--help` - Display help message
 
-#### Example:
+#### Examples:
 ```bash
 # Split a 10GB dump file into chunks of 500 INSERT statements with debug mode
 ./chunk-large-export.sh -i huge_database_dump.sql -c 500 -o ./database_chunks -d
+
+# Split a dump file and extract table structure to a separate file
+./chunk-large-export.sh -i database_dump.sql -o ./chunks -s ./structure.sql
+
+# Extract only structure without chunking (set very large chunk size)
+./chunk-large-export.sh -i database_dump.sql -c 9999999 -s ./structure_only.sql
 ```
 
 ### Import Chunks
