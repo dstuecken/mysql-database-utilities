@@ -77,31 +77,59 @@ if [ -z "$DB_PASS" ]; then
   echo ""
 fi
 
+# Function to run MySQL commands with proper authentication
+run_mysql_command() {
+  local cmd=()
+  local db_arg=""
+
+  # Add password file as first argument if password is provided
+  if [ -n "$MYSQL_PASS_FILE" ]; then
+    cmd+=("--defaults-extra-file=$MYSQL_PASS_FILE")
+  fi
+
+  # Add other MySQL options
+  cmd+=("-u$DB_USER")
+
+  if [ -n "$DB_HOST" ]; then
+    cmd+=("-h$DB_HOST")
+  fi
+
+  # Add the database if specified
+  if [ -n "$1" ]; then
+    db_arg="$1"
+    shift
+  fi
+
+  # Add remaining arguments
+  for arg in "$@"; do
+    cmd+=("$arg")
+  done
+
+  # Execute the command with the database if provided
+  if [ -n "$db_arg" ]; then
+    mysql "${cmd[@]}" "$db_arg"
+  else
+    mysql "${cmd[@]}"
+  fi
+}
+
 # Create password file for secure authentication
 MYSQL_PASS_FILE=""
 if [ -n "$DB_PASS" ]; then
   MYSQL_PASS_FILE=$(mktemp)
   echo "[client]" > "$MYSQL_PASS_FILE"
   echo "password=$DB_PASS" >> "$MYSQL_PASS_FILE"
-fi
-
-# Prepare MySQL connection options as an array for proper handling of arguments
-MYSQL_OPTS=()
-MYSQL_OPTS+=("-u$DB_USER")
-
-if [ -n "$MYSQL_PASS_FILE" ]; then
-  MYSQL_OPTS+=("--defaults-extra-file=$MYSQL_PASS_FILE")
+  chmod 600 "$MYSQL_PASS_FILE"  # Set proper permissions
 fi
 
 if [ -n "$DB_HOST" ]; then
-  MYSQL_OPTS+=("-h$DB_HOST")
   CONNECTION_DESC="host '$DB_HOST'"
 else
   CONNECTION_DESC="local socket"
 fi
 
 # Check if database exists
-DB_EXISTS=$(mysql "${MYSQL_OPTS[@]}" -e "SHOW DATABASES LIKE '$DB_NAME'" 2>/dev/null | grep -c "$DB_NAME" || true)
+DB_EXISTS=$(run_mysql_command "" -e "SHOW DATABASES LIKE '$DB_NAME'" 2>/dev/null | grep -c "$DB_NAME" || true)
 
 if [ "$DB_EXISTS" -gt 0 ] && [ "$FORCE" = false ]; then
   echo "Error: Database '$DB_NAME' already exists. Use --force to import anyway."
@@ -115,7 +143,7 @@ fi
 # Create database if it doesn't exist
 if [ "$DB_EXISTS" -eq 0 ]; then
   echo "Creating database '$DB_NAME'..."
-  mysql "${MYSQL_OPTS[@]}" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\`" || {
+  run_mysql_command "" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\`" || {
     echo "Error: Failed to create database '$DB_NAME'"
     # Clean up password file
     if [ -n "$MYSQL_PASS_FILE" ] && [ -f "$MYSQL_PASS_FILE" ]; then
@@ -124,23 +152,6 @@ if [ "$DB_EXISTS" -eq 0 ]; then
     exit 1
   }
 fi
-
-# Build MySQL import command
-IMPORT_OPTS=("${MYSQL_OPTS[@]}")
-IMPORT_OPTS+=("--max_allowed_packet=$MAX_ALLOWED_PACKET")
-IMPORT_OPTS+=("--net_buffer_length=$NET_BUFFER_LENGTH")
-
-if [ "$DISABLE_KEYS" = true ]; then
-  IMPORT_OPTS+=("--disable-keys")
-fi
-
-if [ "$SHOW_PROGRESS" = true ]; then
-  IMPORT_OPTS+=("--show-warnings")
-else
-  IMPORT_OPTS+=("--silent")
-fi
-
-IMPORT_OPTS+=("$DB_NAME")
 
 # Show import information
 echo "Importing into database '$DB_NAME' on $CONNECTION_DESC as user '$DB_USER'"
@@ -153,8 +164,45 @@ fi
 
 # Prepare the import environment
 echo "Optimizing MySQL for import..."
-mysql "${MYSQL_OPTS[@]}" -e "SET GLOBAL max_allowed_packet=$MAX_ALLOWED_PACKET;" || echo "Warning: Could not set global max_allowed_packet"
-mysql "${MYSQL_OPTS[@]}" -e "SET GLOBAL net_buffer_length=$NET_BUFFER_LENGTH;" || echo "Warning: Could not set global net_buffer_length"
+run_mysql_command "" -e "SET GLOBAL max_allowed_packet=$MAX_ALLOWED_PACKET;" || echo "Warning: Could not set global max_allowed_packet"
+run_mysql_command "" -e "SET GLOBAL net_buffer_length=$NET_BUFFER_LENGTH;" || echo "Warning: Could not set global net_buffer_length"
+
+# Build MySQL import command function
+run_mysql_import() {
+  local cmd=()
+
+  # Add password file as first argument if password is provided
+  if [ -n "$MYSQL_PASS_FILE" ]; then
+    cmd+=("--defaults-extra-file=$MYSQL_PASS_FILE")
+  fi
+
+  # Add other MySQL options
+  cmd+=("-u$DB_USER")
+
+  if [ -n "$DB_HOST" ]; then
+    cmd+=("-h$DB_HOST")
+  fi
+
+  # Add import-specific options
+  cmd+=("--max_allowed_packet=$MAX_ALLOWED_PACKET")
+  cmd+=("--net_buffer_length=$NET_BUFFER_LENGTH")
+
+  if [ "$DISABLE_KEYS" = true ]; then
+    cmd+=("--disable-keys")
+  fi
+
+  if [ "$SHOW_PROGRESS" = true ]; then
+    cmd+=("--show-warnings")
+  else
+    cmd+=("--silent")
+  fi
+
+  # Finally add the database name
+  cmd+=("$DB_NAME")
+
+  # Execute the command
+  mysql "${cmd[@]}"
+}
 
 # Check if the file is gzipped
 if [[ "$INPUT_FILE" == *.gz ]]; then
@@ -164,14 +212,14 @@ if [[ "$INPUT_FILE" == *.gz ]]; then
   if [ "$SHOW_PROGRESS" = true ]; then
     # With progress reporting - using pv if available
     if command -v pv >/dev/null 2>&1; then
-      gunzip -c "$INPUT_FILE" | pv -s $(gzip -l "$INPUT_FILE" | sed -n 2p | awk '{print $2}') | mysql "${IMPORT_OPTS[@]}"
+      gunzip -c "$INPUT_FILE" | pv -s $(gzip -l "$INPUT_FILE" | sed -n 2p | awk '{print $2}') | run_mysql_import
     else
       echo "Note: Install 'pv' for better progress reporting"
-      gunzip -c "$INPUT_FILE" | mysql "${IMPORT_OPTS[@]}"
+      gunzip -c "$INPUT_FILE" | run_mysql_import
     fi
   else
     # Without progress reporting
-    gunzip -c "$INPUT_FILE" | mysql "${IMPORT_OPTS[@]}"
+    gunzip -c "$INPUT_FILE" | run_mysql_import
   fi
 else
   echo "Starting import... This may take a while."
@@ -179,14 +227,14 @@ else
   if [ "$SHOW_PROGRESS" = true ]; then
     # With progress reporting - using pv if available
     if command -v pv >/dev/null 2>&1; then
-      pv "$INPUT_FILE" | mysql "${IMPORT_OPTS[@]}"
+      pv "$INPUT_FILE" | run_mysql_import
     else
       echo "Note: Install 'pv' for better progress reporting"
-      mysql "${IMPORT_OPTS[@]}" < "$INPUT_FILE"
+      run_mysql_import < "$INPUT_FILE"
     fi
   else
     # Without progress reporting
-    mysql "${IMPORT_OPTS[@]}" < "$INPUT_FILE"
+    run_mysql_import < "$INPUT_FILE"
   fi
 fi
 
@@ -208,6 +256,6 @@ fi
 
 # Reset MySQL optimization settings
 echo "Resetting MySQL optimization settings..."
-mysql "${MYSQL_OPTS[@]}" -e "FLUSH TABLES;" || echo "Warning: Could not flush tables"
+run_mysql_command "" -e "FLUSH TABLES;" || echo "Warning: Could not flush tables"
 
 echo "Done."
