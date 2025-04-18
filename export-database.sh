@@ -42,7 +42,7 @@ usage() {
   echo "  -q, --quiet             Disable progress reporting"
   echo "  --skip-add-locks        Skip adding locks in SQL output"
   echo "  --no-create-info        Skip table creation information"
-  echo "  --skip-lock-tables      Skip locking tables during export (use if you get error: 1109)"
+  echo "  --skip-lock-tables      Skip locking tables during export"
   echo "  --no-tablespaces        Skip tablespace information"
   echo "  --structure-only        Export only the database structure (no data)"
   echo "  --data-only             Export only the data (no create statements)"

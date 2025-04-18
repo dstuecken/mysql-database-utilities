@@ -70,6 +70,41 @@ The `export-database.sh` script allows you to export one or more MySQL databases
 ./export-database.sh -u dbadmin -w secure123 -d database --no-data --routines
 ```
 
+### Import Database
+The `import-database.sh` script allows you to import a single SQL file into a MySQL database with optimized settings for performance and reliability.
+
+```bash
+./import-database.sh -u username -w password -n database_name -i import_file.sql
+```
+
+#### Options:
+- `-u, --user USERNAME` - Database username (default: root)
+- `-w, --password PASS` - Database password (default: empty)
+- `-h, --host HOST` - Database host (default: local socket)
+- `-n, --database NAME` - Database to import into (required)
+- `-i, --input FILE` - SQL file to import (required)
+- `-m, --max-packet SIZE` - Max allowed packet size (default: 1G)
+- `-b, --net-buffer SIZE` - Network buffer length (default: 16384)
+- `-k, --keep-keys` - Don't disable keys during import (default: disable)
+- `-f, --force` - Force import even if database exists (default: false)
+- `-q, --quiet` - Disable progress reporting
+- `--help` - Display help message
+
+#### Examples:
+```bash
+# Import a SQL file into a new database
+./import-database.sh -u dbadmin -w secure123 -n new_database -i backup.sql
+
+# Import a compressed SQL file with increased packet size
+./import-database.sh -u dbadmin -w secure123 -n database -i backup.sql.gz -m 2G
+
+# Force import into an existing database
+./import-database.sh -u dbadmin -w secure123 -n existing_db -i backup.sql -f
+
+# Import to a remote database server
+./import-database.sh -u dbadmin -w secure123 -h db.example.com -n database -i backup.sql
+```
+
 ### Chunk Large Export
 The `chunk-large-export.sh` script splits a large SQL dump file into smaller manageable chunks to facilitate easier importing, especially for very large databases. It can also now extract CREATE TABLE statements to a separate structure file.
 
