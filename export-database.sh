@@ -14,6 +14,7 @@ SINGLE_TRANSACTION=true  # Use single transaction for InnoDB
 LOCK_TABLES=false  # Whether to lock tables during export
 EXCLUDE_TABLES=""  # Tables to exclude (comma-separated)
 SHOW_PROGRESS=true  # Whether to show progress information
+HAVE_PV=false  # Whether pv command is available for progress display
 # New MySQL option flags
 SKIP_ADD_LOCKS=false    # Whether to skip adding locks in SQL output
 NO_CREATE_INFO=false    # Whether to skip table creation statements
@@ -90,6 +91,16 @@ if [ "$STRUCTURE_ONLY" = true ] && [ "$DATA_ONLY" = true ]; then
   usage
 fi
 
+# Check required utilities
+if [ "$SHOW_PROGRESS" = true ]; then
+  if ! command -v pv >/dev/null 2>&1; then
+    echo "Warning: 'pv' command is not installed. Progress monitoring will be limited."
+    HAVE_PV=false
+  else
+    HAVE_PV=true
+  fi
+fi
+
 # Create output directory if it doesn't exist
 mkdir -p "$OUTPUT_DIR"
 
@@ -106,62 +117,6 @@ if [ -n "$DB_HOST" ]; then
   echo "host=$DB_HOST" >> "$MYSQL_PASS_FILE"
 fi
 
-# Build the mysqldump command
-DUMP_CMD="mysqldump"
-# FIX: Use correct syntax for defaults-extra-file - with a space instead of equals sign
-DUMP_CMD+=" --defaults-extra-file \"$MYSQL_PASS_FILE\""
-DUMP_CMD+=" --max_allowed_packet=$MAX_ALLOWED_PACKET"
-DUMP_CMD+=" --net_buffer_length=$NET_BUFFER_LENGTH"
-
-# Add options based on user selection
-if [ "$SINGLE_TRANSACTION" = true ]; then
-  DUMP_CMD+=" --single-transaction"
-fi
-
-if [ "$LOCK_TABLES" = true ]; then
-  DUMP_CMD+=" --lock-tables=true"
-else
-  DUMP_CMD+=" --lock-tables=false"
-fi
-
-if [ "$SKIP_ADD_LOCKS" = true ]; then
-  DUMP_CMD+=" --skip-add-locks"
-fi
-
-if [ "$NO_CREATE_INFO" = true ]; then
-  DUMP_CMD+=" --no-create-info"
-fi
-
-if [ "$SKIP_LOCK_TABLES" = true ]; then
-  DUMP_CMD+=" --skip-lock-tables"
-fi
-
-if [ "$NO_TABLESPACES" = true ]; then
-  DUMP_CMD+=" --no-tablespaces"
-fi
-
-if [ "$STRUCTURE_ONLY" = true ]; then
-  DUMP_CMD+=" --no-data"
-fi
-
-if [ "$DATA_ONLY" = true ]; then
-  DUMP_CMD+=" --no-create-info"
-fi
-
-# Progress indication
-if [ "$SHOW_PROGRESS" = true ]; then
-  # Add progress indicator options if supported
-  DUMP_CMD+=" --status"
-fi
-
-# Add excluded tables
-if [ -n "$EXCLUDE_TABLES" ]; then
-  IFS=',' read -ra EXCLUDE_ARRAY <<< "$EXCLUDE_TABLES"
-  for table in "${EXCLUDE_ARRAY[@]}"; do
-    DUMP_CMD+=" --ignore-table=$table"
-  done
-fi
-
 # Process databases
 IFS=',' read -ra DB_ARRAY <<< "$DATABASES"
 for db in "${DB_ARRAY[@]}"; do
@@ -176,21 +131,82 @@ for db in "${DB_ARRAY[@]}"; do
     CURRENT_OUTPUT_FILE="$OUTPUT_DIR/$OUTPUT_FILE"
   fi
 
-  # Execute the dump command
-  FULL_CMD="$DUMP_CMD $db"
+  # Build the mysqldump command directly with an array
+  cmd=(
+    "mysqldump"
+    "--defaults-file=$MYSQL_PASS_FILE"
+    "--max_allowed_packet=$MAX_ALLOWED_PACKET"
+    "--net_buffer_length=$NET_BUFFER_LENGTH"
+  )
 
-  if [ "$COMPRESS" = true ]; then
-    echo "Exporting to: ${CURRENT_OUTPUT_FILE}.gz"
-    eval "$FULL_CMD | gzip > ${CURRENT_OUTPUT_FILE}.gz"
-  else
-    echo "Exporting to: $CURRENT_OUTPUT_FILE"
-    eval "$FULL_CMD > $CURRENT_OUTPUT_FILE"
+  # Add options based on user selection
+  if [ "$SINGLE_TRANSACTION" = true ]; then
+    cmd+=("--single-transaction")
   fi
 
-  if [ $? -eq 0 ]; then
+  if [ "$LOCK_TABLES" = true ]; then
+    cmd+=("--lock-tables=true")
+  else
+    cmd+=("--lock-tables=false")
+  fi
+
+  if [ "$SKIP_ADD_LOCKS" = true ]; then
+    cmd+=("--skip-add-locks")
+  fi
+
+  if [ "$NO_CREATE_INFO" = true ]; then
+    cmd+=("--no-create-info")
+  fi
+
+  if [ "$SKIP_LOCK_TABLES" = true ]; then
+    cmd+=("--skip-lock-tables")
+  fi
+
+  if [ "$NO_TABLESPACES" = true ]; then
+    cmd+=("--no-tablespaces")
+  fi
+
+  if [ "$STRUCTURE_ONLY" = true ]; then
+    cmd+=("--no-data")
+  fi
+
+  if [ "$DATA_ONLY" = true ]; then
+    cmd+=("--no-create-info")
+  fi
+
+  # Add excluded tables
+  if [ -n "$EXCLUDE_TABLES" ]; then
+    IFS=',' read -ra EXCLUDE_ARRAY <<< "$EXCLUDE_TABLES"
+    for table in "${EXCLUDE_ARRAY[@]}"; do
+      cmd+=("--ignore-table=$table")
+    done
+  fi
+
+  # Add database name
+  cmd+=("$db")
+
+  # Execute the dump command with progress indicator if available
+  if [ "$COMPRESS" = true ]; then
+    echo "Exporting to: ${CURRENT_OUTPUT_FILE}.gz"
+    if [ "$SHOW_PROGRESS" = true ] && [ "$HAVE_PV" = true ]; then
+      "${cmd[@]}" | pv -cN mysqldump | gzip > "${CURRENT_OUTPUT_FILE}.gz"
+    else
+      "${cmd[@]}" | gzip > "${CURRENT_OUTPUT_FILE}.gz"
+    fi
+  else
+    echo "Exporting to: $CURRENT_OUTPUT_FILE"
+    if [ "$SHOW_PROGRESS" = true ] && [ "$HAVE_PV" = true ]; then
+      "${cmd[@]}" | pv -cN mysqldump > "$CURRENT_OUTPUT_FILE"
+    else
+      "${cmd[@]}" > "$CURRENT_OUTPUT_FILE"
+    fi
+  fi
+
+  EXPORT_STATUS=$?
+  if [ $EXPORT_STATUS -eq 0 ]; then
     echo "Export of $db completed successfully."
   else
-    echo "Error exporting $db. Exit code: $?"
+    echo "Error exporting $db. Exit code: $EXPORT_STATUS"
   fi
 done
 
