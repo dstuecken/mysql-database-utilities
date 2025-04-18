@@ -117,6 +117,16 @@ if [ -n "$DB_HOST" ]; then
   echo "host=$DB_HOST" >> "$MYSQL_PASS_FILE"
 fi
 
+# Display excluded tables
+if [ -n "$EXCLUDE_TABLES" ]; then
+  echo "The following tables will be excluded from the export:"
+  IFS=',' read -ra EXCLUDE_ARRAY <<< "$EXCLUDE_TABLES"
+  for table in "${EXCLUDE_ARRAY[@]}"; do
+    echo "  - $table"
+  done
+  echo ""
+fi
+
 # Process databases
 IFS=',' read -ra DB_ARRAY <<< "$DATABASES"
 for db in "${DB_ARRAY[@]}"; do
@@ -174,11 +184,27 @@ for db in "${DB_ARRAY[@]}"; do
     cmd+=("--no-create-info")
   fi
 
-  # Add excluded tables
+  # Add excluded tables and collect them for the current database
+  EXCLUDED_TABLES_FOR_DB=()
   if [ -n "$EXCLUDE_TABLES" ]; then
     IFS=',' read -ra EXCLUDE_ARRAY <<< "$EXCLUDE_TABLES"
     for table in "${EXCLUDE_ARRAY[@]}"; do
-      cmd+=("--ignore-table=$table")
+      # Get the database part of db.table format
+      table_db=$(echo "$table" | cut -d. -f1)
+
+      # Add to command only if this exclude is relevant for the current database
+      if [ "$table_db" = "$db" ]; then
+        cmd+=("--ignore-table=$table")
+        EXCLUDED_TABLES_FOR_DB+=("$table")
+      fi
+    done
+  fi
+
+  # Display excluded tables for this specific database
+  if [ ${#EXCLUDED_TABLES_FOR_DB[@]} -gt 0 ]; then
+    echo "Excluding the following tables from $db:"
+    for table in "${EXCLUDED_TABLES_FOR_DB[@]}"; do
+      echo "  - $table"
     done
   fi
 
@@ -208,6 +234,7 @@ for db in "${DB_ARRAY[@]}"; do
   else
     echo "Error exporting $db. Exit code: $EXPORT_STATUS"
   fi
+  echo ""
 done
 
 echo "All database exports completed."
