@@ -23,6 +23,7 @@ NO_TABLESPACES=false    # Whether to skip tablespace information
 # Data and structure export options
 STRUCTURE_ONLY=false    # Whether to export only the database structure
 DATA_ONLY=false         # Whether to export only the data
+REPLACE_INTO=false      # Whether to write REPLACE INTO
 
 # Display usage instructions
 usage() {
@@ -47,6 +48,7 @@ usage() {
   echo "  --no-tablespaces        Skip tablespace information"
   echo "  --structure-only        Export only the database structure (no data)"
   echo "  --data-only             Export only the data (no create statements)"
+  echo "  --replace               Write REPLACE rather than INSERT statements"
   echo "  --help                  Display this help message"
   exit 1
 }
@@ -73,6 +75,7 @@ while [[ "$#" -gt 0 ]]; do
     --no-tablespaces) NO_TABLESPACES=true ;;
     --structure-only) STRUCTURE_ONLY=true ;;
     --data-only) DATA_ONLY=true ;;
+    --replace) REPLACE_INTO=true ;;
     --help) usage ;;
     *) echo "Unknown parameter: $1"; usage ;;
   esac
@@ -172,6 +175,10 @@ for db in "${DB_ARRAY[@]}"; do
 
   if [ "$DATA_ONLY" = true ]; then
     cmd+=("--no-create-info")
+  fi
+
+  if [ "$REPLACE_INTO" = true ]; then
+    cmd+=("--replace")
   fi
 
   # Add excluded tables and collect them for the current database
