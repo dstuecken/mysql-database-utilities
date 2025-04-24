@@ -117,16 +117,6 @@ if [ -n "$DB_HOST" ]; then
   echo "host=$DB_HOST" >> "$MYSQL_PASS_FILE"
 fi
 
-# Display excluded tables
-if [ -n "$EXCLUDE_TABLES" ]; then
-  echo "The following tables will be excluded from the export:"
-  IFS=',' read -ra EXCLUDE_ARRAY <<< "$EXCLUDE_TABLES"
-  for table in "${EXCLUDE_ARRAY[@]}"; do
-    echo "  - $table"
-  done
-  echo ""
-fi
-
 # Process databases
 IFS=',' read -ra DB_ARRAY <<< "$DATABASES"
 for db in "${DB_ARRAY[@]}"; do
