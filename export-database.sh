@@ -24,13 +24,16 @@ NO_TABLESPACES=false    # Whether to skip tablespace information
 STRUCTURE_ONLY=false    # Whether to export only the database structure
 DATA_ONLY=false         # Whether to export only the data
 REPLACE_INTO=false      # Whether to write REPLACE INTO
+TABLE_NAME=""           # Specific table to export
+WHERE_CLAUSE=""         # WHERE clause for filtering data
+
 
 # Display usage instructions
 usage() {
   echo "Usage: $0 [options]"
   echo "Options:"
   echo "  -u, --user USERNAME     Database username (default: root)"
-  echo "  -w, --password PASS     Database password (default: prompt)"
+  echo "  -p, --password PASS     Database password (default: prompt)"
   echo "  -h, --host HOST         Database host (default: local socket)"
   echo "  -d, --databases DB[,DB] Databases to export (comma-separated, required)"
   echo "  -f, --file FILENAME     Output file name (default: database_export.sql)"
@@ -38,10 +41,12 @@ usage() {
   echo "  -z, --compress          Compress output file(s) with gzip"
   echo "  -m, --max-packet SIZE   Max allowed packet size (default: 1G)"
   echo "  -n, --net-buffer SIZE   Network buffer length (default: 16384)"
-  echo "  -t, --lock-tables       Lock all tables during export (default: false)"
   echo "  -s, --skip-transaction  Skip using single transaction (default: use transaction)"
   echo "  -x, --exclude TABLES    Tables to exclude (comma-separated, format: db.table)"
   echo "  -q, --quiet             Disable progress reporting"
+  echo "  --table TABLE           Specific table to export"
+  echo "  --where CLAUSE          WHERE clause for filtering data (must be quoted)"
+  echo "  --lock-tables           Lock all tables during export (default: false)"
   echo "  --skip-add-locks        Skip adding locks in SQL output"
   echo "  --no-create-info        Skip table creation information"
   echo "  --skip-lock-tables      Skip locking tables during export"
@@ -57,7 +62,7 @@ usage() {
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     -u|--user) DB_USER="$2"; shift ;;
-    -w|--password) DB_PASS="$2"; shift ;;
+    -p|--password) DB_PASS="$2"; shift ;;
     -h|--host) DB_HOST="$2"; shift ;;
     -d|--databases) DATABASES="$2"; shift ;;
     -f|--file) OUTPUT_FILE="$2"; shift ;;
@@ -65,10 +70,12 @@ while [[ "$#" -gt 0 ]]; do
     -z|--compress) COMPRESS=true ;;
     -m|--max-packet) MAX_ALLOWED_PACKET="$2"; shift ;;
     -n|--net-buffer) NET_BUFFER_LENGTH="$2"; shift ;;
-    -t|--lock-tables) LOCK_TABLES=true ;;
     -s|--skip-transaction) SINGLE_TRANSACTION=false ;;
     -x|--exclude) EXCLUDE_TABLES="$2"; shift ;;
     -q|--quiet) SHOW_PROGRESS=false ;;
+    --table) TABLE_NAME="$2"; shift ;;
+    --where) WHERE_CLAUSE="$2"; shift ;;
+    --lock-tables) LOCK_TABLES=true ;;
     --skip-add-locks) SKIP_ADD_LOCKS=true ;;
     --no-create-info) NO_CREATE_INFO=true ;;
     --skip-lock-tables) SKIP_LOCK_TABLES=true ;;
@@ -207,6 +214,17 @@ for db in "${DB_ARRAY[@]}"; do
 
   # Add database name
   cmd+=("$db")
+
+  # Add where clause if specified (only applicable with a specific table)
+  if [ -n "$TABLE_NAME" ]; then
+    cmd+=("$TABLE_NAME")
+    if [ -n "$WHERE_CLAUSE" ]; then
+      cmd+=("--where=$WHERE_CLAUSE")
+      echo "Exporting table $TABLE_NAME with WHERE clause: $WHERE_CLAUSE"
+    else
+      echo "Exporting table $TABLE_NAME"
+    fi
+  fi
 
   # Execute the dump command with progress indicator if available
   if [ "$COMPRESS" = true ]; then
