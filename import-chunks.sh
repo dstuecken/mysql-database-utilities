@@ -24,7 +24,7 @@ usage() {
   echo "  -p, --path DIRECTORY  Directory containing chunk files (default: ./chunks)"
   echo "  -u, --user USERNAME   Database username (default: root)"
   echo "  -w, --password PASS   Database password"
-  echo "  -n, --database NAME   Database name (default: )"
+  echo "  -d, --database NAME   Database name (default: )"
   echo "  -h, --host HOST       Database host (default: local socket)"
   echo "  -m, --max-packet SIZE Max allowed packet size in bytes (default: 2073741824)"
   echo "  -s, --sleep SECONDS   Sleep time between chunks in seconds (default: 3)"
@@ -44,7 +44,7 @@ while [[ "$#" -gt 0 ]]; do
     -p|--path) CHUNKS_DIR="$2"; shift ;;
     -u|--user) DB_USER="$2"; shift ;;
     -w|--password) DB_PASS="$2"; shift ;;
-    -n|--database) DB_NAME="$2"; shift ;;
+    -d|--database) DB_NAME="$2"; shift ;;
     -h|--host) DB_HOST="$2"; shift ;;
     -m|--max-packet) MAX_PACKET="$2"; shift ;;
     -s|--sleep) SLEEP_SECONDS="$2"; shift ;;

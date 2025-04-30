@@ -35,7 +35,7 @@ usage() {
   echo "  -u, --user USERNAME    Database username (default: root)"
   echo "  -w, --password PASS    Database password (default: prompt)"
   echo "  -h, --host HOST        Database host (default: local socket)"
-  echo "  -n, --database NAME    Database to import into (required)"
+  echo "  -d, --database NAME    Database to import into (required)"
   echo "  -i, --input FILE       SQL file to import (required)"
   echo "  -m, --max-packet SIZE  Max allowed packet size (default: 1G)"
   echo "  -b, --net-buffer SIZE  Network buffer length (default: 16384)"
@@ -53,7 +53,7 @@ while [[ "$#" -gt 0 ]]; do
     -u|--user) DB_USER="$2"; shift ;;
     -w|--password) DB_PASS="$2"; shift ;;
     -h|--host) DB_HOST="$2"; shift ;;
-    -n|--database) DB_NAME="$2"; shift ;;
+    -d|--database) DB_NAME="$2"; shift ;;
     -i|--input) INPUT_FILE="$2"; shift ;;
     -m|--max-packet)
       MAX_ALLOWED_PACKET=$(convert_to_bytes "$2")
