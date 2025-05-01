@@ -37,15 +37,15 @@ process_complete_insert() {
     # Display progress periodically
     if [ $((INSERT_COUNT % 10)) -eq 0 ]; then
         PROGRESS_PERCENT=$((INSERT_COUNT * 100 / TOTAL_INSERTS))
-        printf "\rProcessed %d lines | Progress: %d%% (%d/%d inserts)" "$LINE_NUM" $PROGRESS_PERCENT $INSERT_COUNT $TOTAL_INSERTS
-        debug_echo "Progress update: $PROGRESS_PERCENT% ($INSERT_COUNT/$TOTAL_INSERTS inserts)"
+        printf "\rProcessed %d lines | Progress: %d%% (%d/%d statements)" "$LINE_NUM" $PROGRESS_PERCENT $INSERT_COUNT $TOTAL_INSERTS
+        debug_echo "Progress update: $PROGRESS_PERCENT% ($INSERT_COUNT/$TOTAL_INSERTS statements)"
     fi
 
     # Check if we need to start a new chunk
     if [ $((INSERT_COUNT % CHUNK_SIZE)) -eq 0 ]; then
         # Add footer to current chunk
         echo -e "$SQL_FOOTER" >> "$CURRENT_CHUNK_FILE"
-        debug_echo "Completed chunk $CHUNK_NUM with $CHUNK_SIZE inserts"
+        debug_echo "Completed chunk $CHUNK_NUM with $CHUNK_SIZE statements"
 
         # Start a new chunk
         CHUNK_NUM=$((CHUNK_NUM + 1))
@@ -78,7 +78,7 @@ if [ ! -f "$INPUT_FILE" ]; then
   exit 1
 fi
 
-echo "Chunk size: $CHUNK_SIZE INSERT statements per chunk"
+echo "Chunk size: $CHUNK_SIZE SQL statements per chunk"
 echo "Output directory: $CHUNKS_DIR"
 if [ -n "$STRUCTURE_FILE" ]; then
   echo "Structure output file: $STRUCTURE_FILE"
@@ -144,18 +144,20 @@ fi
 
 echo "Processing SQL file in a single pass..."
 
-# Count total inserts for progress reporting
-echo "Counting INSERT statements (may take a moment for large files)..."
-TOTAL_INSERTS=$(grep -c -i "INSERT INTO" "$INPUT_FILE")
-echo "Found approximately $TOTAL_INSERTS INSERT statements"
+# Count total SQL statements (both INSERT and REPLACE) for progress reporting
+echo "Counting SQL statements (may take a moment for large files)..."
+INSERT_COUNT=$(grep -c -i "INSERT INTO" "$INPUT_FILE")
+REPLACE_COUNT=$(grep -c -i "REPLACE INTO" "$INPUT_FILE")
+TOTAL_INSERTS=$((INSERT_COUNT + REPLACE_COUNT))
+echo "Found approximately $TOTAL_INSERTS SQL statements ($INSERT_COUNT INSERT, $REPLACE_COUNT REPLACE)"
 
-# Exit if no INSERT statements found
+# Exit if no statements found
 if [ "$TOTAL_INSERTS" -eq 0 ]; then
-  echo "No INSERT statements found in the file. Exiting."
+  echo "No INSERT or REPLACE statements found in the file. Exiting."
   exit 1
 fi
 
-debug_echo "Total INSERT statements: $TOTAL_INSERTS"
+debug_echo "Total statements: $TOTAL_INSERTS"
 
 # Variables for chunking
 CHUNK_NUM=1
@@ -167,7 +169,7 @@ debug_echo "Initial chunk file: $CURRENT_CHUNK_FILE"
 # Start with header for first chunk
 echo -e "$SQL_HEADER" > "$CURRENT_CHUNK_FILE"
 
-# Process the file to extract INSERT statements and apply chunking
+# Process the file to extract SQL statements and apply chunking
 LINE_NUM=0
 IN_INSERT=false
 CURRENT_INSERT=""
@@ -189,19 +191,19 @@ while IFS= read -r line; do
         continue
     fi
 
-    # Check if this is the start of an INSERT statement
-    if [[ "$line" == "INSERT INTO "* ]] || [ "$REPLACE_MODE" = true ] && [[ "$line" == "REPLACE INTO "* ]]; then
-        # If we were already processing an INSERT statement, process the completed one
+    # Check if this is the start of an INSERT or REPLACE statement
+    if [[ "$line" == "INSERT INTO "* ]] || [[ "$line" == "REPLACE INTO "* ]]; then
+        # If we were already processing a statement, process the completed one
         if [ "$IN_INSERT" = true ]; then
-            # Add the complete INSERT to the current chunk
+            # Add the complete statement to the current chunk
             echo "$CURRENT_INSERT" >> "$CURRENT_CHUNK_FILE"
             process_complete_insert
         fi
 
-        # Start a new INSERT
+        # Start a new statement
         IN_INSERT=true
 
-        # Replace INSERT INTO with REPLACE INTO if requested
+        # Replace INSERT INTO with REPLACE INTO if requested and not already REPLACE
         if [ "$REPLACE_MODE" = true ] && [[ "$line" == "INSERT INTO "* ]]; then
             line="${line/INSERT INTO/REPLACE INTO}"
             debug_echo "Converted INSERT to REPLACE at line $LINE_NUM"
@@ -209,21 +211,21 @@ while IFS= read -r line; do
 
         CURRENT_INSERT="$line"
 
-        # If INSERT is complete (ends with semicolon), process it immediately
+        # If statement is complete (ends with semicolon), process it immediately
         if [[ "$line" == *";"* ]]; then
-            # Add the complete INSERT to the current chunk
+            # Add the complete statement to the current chunk
             echo "$CURRENT_INSERT" >> "$CURRENT_CHUNK_FILE"
             process_complete_insert
             IN_INSERT=false
             CURRENT_INSERT=""
         fi
     elif [ "$IN_INSERT" = true ]; then
-        # Continue building the current INSERT statement
+        # Continue building the current SQL statement
         CURRENT_INSERT="$CURRENT_INSERT"$'\n'"$line"
 
-        # If we've reached the end of the INSERT (semicolon), process it
+        # If we've reached the end of the statement (semicolon), process it
         if [[ "$line" == *";"* ]]; then
-            # Add the complete INSERT to the current chunk
+            # Add the complete statement to the current chunk
             echo "$CURRENT_INSERT" >> "$CURRENT_CHUNK_FILE"
             process_complete_insert
             IN_INSERT=false
@@ -238,7 +240,7 @@ while IFS= read -r line; do
 
 done < "$INPUT_FILE"
 
-# Process any remaining INSERT statement
+# Process any remaining SQL statement
 if [ "$IN_INSERT" = true ]; then
     echo "$CURRENT_INSERT" >> "$CURRENT_CHUNK_FILE"
     process_complete_insert
@@ -253,4 +255,4 @@ echo "Created $CHUNK_NUM chunks in $CHUNKS_DIR"
 if [ -n "$STRUCTURE_FILE" ]; then
     echo "Structure definitions saved to $STRUCTURE_FILE"
 fi
-echo "Total INSERT statements processed: $INSERT_COUNT"
+echo "Total SQL statements processed: $INSERT_COUNT"
