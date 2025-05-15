@@ -13,6 +13,7 @@ SHOW_PROGRESS=true  # Whether to show progress information
 DISABLE_KEYS=true  # Whether to disable keys during import
 FORCE=false  # Force import even if database exists
 IGNORE_ERRORS=false  # Continue importing even when errors occur
+USE_MYSQL_PASS_FILE=false
 
 # Convert human-readable sizes to bytes
 convert_to_bytes() {
@@ -47,6 +48,12 @@ usage() {
   echo "  --ignore-errors        Continue importing even when errors occur (uses --force flag on mysql)"
   echo "  --help                 Display this help message"
   exit 1
+}
+
+cleanup_pass_file() {
+  if [ -n "$MYSQL_PASS_FILE" ] && [ -f "$MYSQL_PASS_FILE" ]; then
+    rm -f "$MYSQL_PASS_FILE"
+  fi
 }
 
 # Parse command line arguments
@@ -104,7 +111,7 @@ fi
 
 # Create password file for secure authentication
 MYSQL_PASS_FILE=""
-if [ -n "$DB_PASS" ]; then
+if [ -n "$DB_PASS" ] && [ "$USE_MYSQL_PASS_FILE" = true ]; then
   MYSQL_PASS_FILE=$(mktemp)
   echo "[client]" > "$MYSQL_PASS_FILE"
   echo "password=$DB_PASS" >> "$MYSQL_PASS_FILE"
@@ -174,10 +181,7 @@ DB_EXISTS=$(run_mysql_command "" -e "SHOW DATABASES LIKE '$DB_NAME'" 2>/dev/null
 
 if [ "$DB_EXISTS" -gt 0 ] && [ "$FORCE" = false ]; then
   echo "Error: Database '$DB_NAME' already exists. Use --force to import anyway."
-  # Clean up password file
-  if [ -n "$MYSQL_PASS_FILE" ] && [ -f "$MYSQL_PASS_FILE" ]; then
-    rm -f "$MYSQL_PASS_FILE"
-  fi
+  cleanup_pass_file
   exit 1
 fi
 
@@ -188,20 +192,14 @@ if [ "$DB_EXISTS" -eq 0 ]; then
 
   if [ "$CAN_CREATE_DB" -eq 0 ]; then
     echo "Error: User '$DB_USER' does not have permission to create database '$DB_NAME'."
-    # Clean up password file
-    if [ -n "$MYSQL_PASS_FILE" ] && [ -f "$MYSQL_PASS_FILE" ]; then
-      rm -f "$MYSQL_PASS_FILE"
-    fi
+    cleanup_pass_file
     exit 1
   fi
 
   echo "Creating database '$DB_NAME'..."
   run_mysql_command "" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\`" || {
     echo "Error: Failed to create database '$DB_NAME'"
-    # Clean up password file
-    if [ -n "$MYSQL_PASS_FILE" ] && [ -f "$MYSQL_PASS_FILE" ]; then
-      rm -f "$MYSQL_PASS_FILE"
-    fi
+    cleanup_pass_file
     exit 1
   }
 fi
@@ -250,6 +248,8 @@ run_mysql_import() {
   # Add password file as first argument if password is provided
   if [ -n "$MYSQL_PASS_FILE" ]; then
     cmd+=("--defaults-extra-file=$MYSQL_PASS_FILE")
+  else
+    cmd+=("-p$DB_PASS")
   fi
 
   # Add other MySQL options
@@ -339,10 +339,7 @@ if [ "$DISABLE_KEYS" = true ] && [ "$DB_EXISTS" -gt 0 ] && [ "$CAN_ALTER" -gt 0 
   done
 fi
 
-# Clean up password file
-if [ -n "$MYSQL_PASS_FILE" ] && [ -f "$MYSQL_PASS_FILE" ]; then
-  rm -f "$MYSQL_PASS_FILE"
-fi
+cleanup_pass_file
 
 # Report on import result
 if [ $IMPORT_STATUS -eq 0 ]; then
