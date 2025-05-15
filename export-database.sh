@@ -28,7 +28,6 @@ TABLE_NAME=""           # Specific table to export
 WHERE_CLAUSE=""         # WHERE clause for filtering data
 
 
-# Display usage instructions
 usage() {
   echo "Usage: $0 [options]"
   echo "Options:"
@@ -43,9 +42,10 @@ usage() {
   echo "  -n, --net-buffer SIZE   Network buffer length (default: 16384)"
   echo "  -s, --skip-transaction  Skip using single transaction (default: use transaction)"
   echo "  -x, --exclude TABLES    Tables to exclude (comma-separated, format: db.table)"
+  echo "  -i, --include TABLES    Tables to include (comma-separated, format: db.table)"
   echo "  -q, --quiet             Disable progress reporting"
   echo "  --table TABLE           Specific table to export"
-  echo "  --where CLAUSE          WHERE clause for filtering data (must be quoted)"
+  echo "  --where CLAUSE          WHERE clause for filtering data (must be quoted, only works with --table)"
   echo "  --lock-tables           Lock all tables during export (default: false)"
   echo "  --skip-add-locks        Skip adding locks in SQL output"
   echo "  --no-create-info        Skip table creation information"
@@ -57,6 +57,7 @@ usage() {
   echo "  --help                  Display this help message"
   exit 1
 }
+
 
 # Parse command line arguments
 while [[ "$#" -gt 0 ]]; do
@@ -88,6 +89,7 @@ while [[ "$#" -gt 0 ]]; do
   esac
   shift
 done
+
 
 # Validate required parameters
 if [ -z "$DATABASES" ]; then
