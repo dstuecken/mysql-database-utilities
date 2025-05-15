@@ -4,6 +4,7 @@
 DB_USER="root"
 DB_PASS=""
 DB_HOST=""  # Empty means use local socket
+DB_PORT="3306"
 DB_NAME=""  # Database to import into
 INPUT_FILE=""  # SQL file to import
 MAX_ALLOWED_PACKET="1073741824"  # 1GB in bytes
@@ -35,6 +36,7 @@ usage() {
   echo "  -u, --user USERNAME    Database username (default: root)"
   echo "  -p, --password PASS    Database password (default: prompt)"
   echo "  -h, --host HOST        Database host (default: local socket)"
+  echo "  -P, --port PORT        Database port (default: 3306)"
   echo "  -d, --database NAME    Database to import into (required)"
   echo "  -i, --input FILE       SQL file to import (required)"
   echo "  -m, --max-packet SIZE  Max allowed packet size (default: 1G)"
@@ -53,6 +55,7 @@ while [[ "$#" -gt 0 ]]; do
     -u|--user) DB_USER="$2"; shift ;;
     -p|--password) DB_PASS="$2"; shift ;;
     -h|--host) DB_HOST="$2"; shift ;;
+    -P|--port) DB_PORT="$2"; shift ;;
     -d|--database) DB_NAME="$2"; shift ;;
     -i|--input) INPUT_FILE="$2"; shift ;;
     -m|--max-packet)
@@ -125,6 +128,10 @@ run_mysql_command() {
     cmd+=("-h$DB_HOST")
   fi
 
+  if [ -n "$DB_PORT" ]; then
+    cmd+=("-P$DB_PORT")
+  fi
+
   # Add the database if specified
   if [ -n "$1" ]; then
     db_arg="$1"
@@ -176,7 +183,7 @@ fi
 
 # Check if the user has privileges to create a database
 if [ "$DB_EXISTS" -eq 0 ]; then
-  echo "Checking if user can create database..."
+  echo "Database does not exist. Checking if user can create database..."
   CAN_CREATE_DB=$(run_mysql_command "" -e "SHOW GRANTS" 2>/dev/null | grep -E "ALL PRIVILEGES|CREATE" | grep -c "." || true)
 
   if [ "$CAN_CREATE_DB" -eq 0 ]; then
