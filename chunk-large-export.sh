@@ -96,6 +96,7 @@ echo "File size: $FILE_SIZE"
 
 # Create SQL header with settings
 SQL_HEADER="-- Created with https://github.com/dstuecken/mysql-database-utilities - $(date)\n"
+SQL_HEADER+="SET foreign_key_checks=0;\nSET unique_checks=0;\nSET autocommit=0;\nBEGIN;\n"
 
 # Create SQL footer with commit
 SQL_FOOTER="\nCOMMIT;\nSET foreign_key_checks=1;\nSET unique_checks=1;\nSET autocommit=1;"
@@ -146,11 +147,11 @@ echo "Processing SQL file in a single pass..."
 
 # Count total SQL statements (both INSERT and REPLACE) for progress reporting
 echo "Counting SQL statements (may take a moment for large files)..."
-INSERT_COUNT=$(grep -c -i "INSERT INTO" "$INPUT_FILE")
-REPLACE_COUNT=$(grep -c -i "REPLACE INTO" "$INPUT_FILE")
-TOTAL_INSERTS=$((INSERT_COUNT + REPLACE_COUNT))
-echo "Found approximately $TOTAL_INSERTS SQL statements ($INSERT_COUNT INSERT, $REPLACE_COUNT REPLACE)"
+# Count beginning statements to get an approximate number
+INSERT_COUNT=$(grep -c -E "^(INSERT INTO|REPLACE INTO)" "$INPUT_FILE")
+echo "Found approximately $INSERT_COUNT SQL statements"
 
+TOTAL_INSERTS=$INSERT_COUNT
 # Exit if no statements found
 if [ "$TOTAL_INSERTS" -eq 0 ]; then
   echo "No INSERT or REPLACE statements found in the file. Exiting."
@@ -171,37 +172,54 @@ echo -e "$SQL_HEADER" > "$CURRENT_CHUNK_FILE"
 
 # Process the file to extract SQL statements and apply chunking
 LINE_NUM=0
-IN_INSERT=false
-CURRENT_INSERT=""
+COLLECTING_VALUES=false
+CURRENT_INSERT_PREFIX=""
+VALUES_ROWS=()
+CURRENT_VALUES_LINE=""
+IN_CREATE_TABLE=false
 
 # Process the file line by line
 while IFS= read -r line; do
     LINE_NUM=$((LINE_NUM + 1))
 
-    # Skip structure lines if they're part of a CREATE TABLE statement (already extracted)
-    if [[ "$line" == "CREATE TABLE "* ]] && [ -n "$STRUCTURE_FILE" ]; then
-        debug_echo "Skipping CREATE TABLE at line $LINE_NUM (already extracted)"
-        # Skip until we find a line ending with semicolon
-        while IFS= read -r create_line; do
-            LINE_NUM=$((LINE_NUM + 1))
-            if [[ "$create_line" == *";"* ]]; then
-                break
-            fi
-        done
+    # Skip empty lines
+    if [[ -z "$line" ]]; then
         continue
     fi
 
-    # Check if this is the start of an INSERT or REPLACE statement
-    if [[ "$line" == "INSERT INTO "* ]] || [[ "$line" == "REPLACE INTO "* ]]; then
-        # If we were already processing a statement, process the completed one
-        if [ "$IN_INSERT" = true ]; then
-            # Add the complete statement to the current chunk
-            echo "$CURRENT_INSERT" >> "$CURRENT_CHUNK_FILE"
-            process_complete_insert
+    # Skip comments
+    if [[ "$line" == \#* ]] || [[ "$line" == --* ]]; then
+        continue
+    fi
+
+    # Handle CREATE TABLE statements for structure extraction
+    if [[ "$line" == "CREATE TABLE "* ]]; then
+        IN_CREATE_TABLE=true
+        if [ -n "$STRUCTURE_FILE" ]; then
+            debug_echo "Skipping CREATE TABLE at line $LINE_NUM (already extracted)"
+        fi
+    fi
+
+    if [ "$IN_CREATE_TABLE" = true ]; then
+        if [[ "$line" == *";"* ]]; then
+            IN_CREATE_TABLE=false
+        fi
+        continue
+    fi
+
+    # Check if this is the start of an INSERT or REPLACE statement with a VALUES clause
+    if [[ "$line" == "INSERT INTO "* && "$line" == *" VALUES"* ]] || [[ "$line" == "REPLACE INTO "* && "$line" == *" VALUES"* ]]; then
+        # If we were already collecting values, process all collected values
+        if [ "$COLLECTING_VALUES" = true ]; then
+            for value_row in "${VALUES_ROWS[@]}"; do
+                echo "$CURRENT_INSERT_PREFIX VALUES $value_row;" >> "$CURRENT_CHUNK_FILE"
+                process_complete_insert
+            done
+            VALUES_ROWS=()
         fi
 
-        # Start a new statement
-        IN_INSERT=true
+        # Start collecting values for a new INSERT/REPLACE
+        COLLECTING_VALUES=true
 
         # Replace INSERT INTO with REPLACE INTO if requested and not already REPLACE
         if [ "$REPLACE_MODE" = true ] && [[ "$line" == "INSERT INTO "* ]]; then
@@ -209,41 +227,81 @@ while IFS= read -r line; do
             debug_echo "Converted INSERT to REPLACE at line $LINE_NUM"
         fi
 
-        CURRENT_INSERT="$line"
-
-        # If statement is complete (ends with semicolon), process it immediately
-        if [[ "$line" == *";"* ]]; then
-            # Add the complete statement to the current chunk
-            echo "$CURRENT_INSERT" >> "$CURRENT_CHUNK_FILE"
-            process_complete_insert
-            IN_INSERT=false
-            CURRENT_INSERT=""
+        # Extract the prefix (everything before "VALUES")
+        if [[ "$line" == *" VALUES ("* ]]; then
+            # If VALUES and first value are on the same line
+            CURRENT_INSERT_PREFIX="${line% VALUES*} VALUES"
+            CURRENT_VALUES_LINE="${line#* VALUES }"
+        else
+            # If VALUES is at the end of the line
+            CURRENT_INSERT_PREFIX="${line}"
+            CURRENT_VALUES_LINE=""
         fi
-    elif [ "$IN_INSERT" = true ]; then
-        # Continue building the current SQL statement
-        CURRENT_INSERT="$CURRENT_INSERT"$'\n'"$line"
 
-        # If we've reached the end of the statement (semicolon), process it
+        # If the line already includes a complete statement with a semicolon
         if [[ "$line" == *";"* ]]; then
-            # Add the complete statement to the current chunk
-            echo "$CURRENT_INSERT" >> "$CURRENT_CHUNK_FILE"
+            echo "$line" >> "$CURRENT_CHUNK_FILE"
             process_complete_insert
-            IN_INSERT=false
-            CURRENT_INSERT=""
+            COLLECTING_VALUES=false
+        fi
+    elif [ "$COLLECTING_VALUES" = true ]; then
+        # Continue collecting values
+
+        # Append the current line to the values collection
+        if [ -z "$CURRENT_VALUES_LINE" ]; then
+            CURRENT_VALUES_LINE="$line"
+        else
+            CURRENT_VALUES_LINE="$CURRENT_VALUES_LINE $line"
+        fi
+
+        # Check if we have a complete row (ending with a comma or semicolon)
+        if [[ "$line" == *"),"* ]]; then
+            # Found a row ending with a comma - store it
+            row="${CURRENT_VALUES_LINE}"
+            # Remove the trailing comma
+            row="${row%,}"
+            VALUES_ROWS+=("$row")
+            CURRENT_VALUES_LINE=""
+        elif [[ "$line" == *");"* ]]; then
+            # Found the final row ending with a semicolon
+            row="${CURRENT_VALUES_LINE}"
+            # Remove the trailing semicolon
+            row="${row%\;}"
+            VALUES_ROWS+=("$row")
+
+            # Process all collected values
+            for value_row in "${VALUES_ROWS[@]}"; do
+                echo "$CURRENT_INSERT_PREFIX VALUES $value_row;" >> "$CURRENT_CHUNK_FILE"
+                process_complete_insert
+            done
+
+            # Reset for next collection
+            COLLECTING_VALUES=false
+            VALUES_ROWS=()
+            CURRENT_VALUES_LINE=""
+        fi
+    else
+        # This is some other kind of SQL statement, just echo it as-is
+        echo "$line" >> "$CURRENT_CHUNK_FILE"
+
+        # If this line completes a statement, count it
+        if [[ "$line" == *";"* ]]; then
+            process_complete_insert
         fi
     fi
 
-    # Display progress periodically based on line count
+    # Display progress periodically
     if [ $((LINE_NUM % 10000)) -eq 0 ]; then
         debug_echo "Processed $LINE_NUM lines"
     fi
-
 done < "$INPUT_FILE"
 
-# Process any remaining SQL statement
-if [ "$IN_INSERT" = true ]; then
-    echo "$CURRENT_INSERT" >> "$CURRENT_CHUNK_FILE"
-    process_complete_insert
+# Process any remaining values
+if [ "$COLLECTING_VALUES" = true ] && [ ${#VALUES_ROWS[@]} -gt 0 ]; then
+    for value_row in "${VALUES_ROWS[@]}"; do
+        echo "$CURRENT_INSERT_PREFIX VALUES $value_row;" >> "$CURRENT_CHUNK_FILE"
+        process_complete_insert
+    done
 fi
 
 # Add footer to final chunk

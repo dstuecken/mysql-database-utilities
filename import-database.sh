@@ -33,7 +33,7 @@ usage() {
   echo "Usage: $0 [options]"
   echo "Options:"
   echo "  -u, --user USERNAME    Database username (default: root)"
-  echo "  -w, --password PASS    Database password (default: prompt)"
+  echo "  -p, --password PASS    Database password (default: prompt)"
   echo "  -h, --host HOST        Database host (default: local socket)"
   echo "  -d, --database NAME    Database to import into (required)"
   echo "  -i, --input FILE       SQL file to import (required)"
@@ -41,8 +41,8 @@ usage() {
   echo "  -b, --net-buffer SIZE  Network buffer length (default: 16384)"
   echo "  -k, --keep-keys        Don't disable keys during import (default: disable)"
   echo "  -f, --force            Force import even if database exists (default: false)"
-  echo "  --ignore-errors        Continue importing even when errors occur (uses --force flag on mysql)"
   echo "  -q, --quiet            Disable progress reporting"
+  echo "  --ignore-errors        Continue importing even when errors occur (uses --force flag on mysql)"
   echo "  --help                 Display this help message"
   exit 1
 }
@@ -51,7 +51,7 @@ usage() {
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     -u|--user) DB_USER="$2"; shift ;;
-    -w|--password) DB_PASS="$2"; shift ;;
+    -p|--password) DB_PASS="$2"; shift ;;
     -h|--host) DB_HOST="$2"; shift ;;
     -d|--database) DB_NAME="$2"; shift ;;
     -i|--input) INPUT_FILE="$2"; shift ;;

@@ -20,14 +20,14 @@ usage() {
   echo "Options:"
   echo "  -f, --from NUMBER     Start importing from chunk number (default: 1)"
   echo "  -t, --to NUMBER       Stop importing at chunk number (default: all chunks)"
-  echo "  -d, --dry-run         Show what would be imported without actually importing"
-  echo "  -p, --path DIRECTORY  Directory containing chunk files (default: ./chunks)"
   echo "  -u, --user USERNAME   Database username (default: root)"
-  echo "  -w, --password PASS   Database password"
+  echo "  -p, --password PASS   Database password"
   echo "  -d, --database NAME   Database name (default: )"
   echo "  -h, --host HOST       Database host (default: local socket)"
   echo "  -m, --max-packet SIZE Max allowed packet size in bytes (default: 2073741824)"
   echo "  -s, --sleep SECONDS   Sleep time between chunks in seconds (default: 3)"
+  echo "  --path DIRECTORY      Directory containing chunk files (default: ./chunks)"
+  echo "  --dry-run             Show what would be imported without actually importing"
   echo "  --move-imported DIR   Move successfully imported chunks to specified directory"
   echo "  --help                Display this help message"
   echo ""
@@ -40,14 +40,14 @@ while [[ "$#" -gt 0 ]]; do
   case $1 in
     -f|--from) FROM_CHUNK="$2"; shift ;;
     -t|--to) TO_CHUNK="$2"; shift ;;
-    -d|--dry-run) DRY_RUN=true ;;
-    -p|--path) CHUNKS_DIR="$2"; shift ;;
     -u|--user) DB_USER="$2"; shift ;;
-    -w|--password) DB_PASS="$2"; shift ;;
+    -p|--password) DB_PASS="$2"; shift ;;
     -d|--database) DB_NAME="$2"; shift ;;
     -h|--host) DB_HOST="$2"; shift ;;
     -m|--max-packet) MAX_PACKET="$2"; shift ;;
     -s|--sleep) SLEEP_SECONDS="$2"; shift ;;
+    --path) CHUNKS_DIR="$2"; shift ;;
+    --dry-run) DRY_RUN=true ;;
     --move-imported) MOVE_IMPORTED=true; COMPLETED_DIR="$2"; shift ;;
     --help) usage ;;
     *) echo "Unknown parameter: $1"; usage ;;
