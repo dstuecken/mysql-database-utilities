@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # Default values
 CHUNK_SIZE=200  # Number of INSERT statements per chunk
