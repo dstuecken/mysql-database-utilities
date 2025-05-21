@@ -150,7 +150,7 @@ The `import-chunks.sh` script allows you to import chunked SQL files with memory
 - `-w, --password PASS` - Database password
 - `-n, --database NAME` - Database name
 - `-h, --host HOST` - Database host (default: local socket)
-- `-m, --max-packet SIZE` - Max allowed packet size in bytes (default: 1073741824)
+- `-m, --max-packet SIZE` - Max allowed packet size in bytes (default: 2147483648)
 - `-s, --sleep SECONDS` - Sleep time between chunks in seconds (default: 3)
 - `--help` - Display help message
 

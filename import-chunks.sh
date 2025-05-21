@@ -10,7 +10,7 @@ DB_PASS=""
 DB_NAME=""
 DB_HOST=""  # Empty means use local socket
 SLEEP_SECONDS=3  # Sleep time between chunks
-MAX_PACKET="2073741824"  # Default max allowed packet size (2GB)
+MAX_PACKET="2147483648"  # Default max allowed packet size (2GB)
 MOVE_IMPORTED=false
 COMPLETED_DIR=""
 
@@ -24,7 +24,7 @@ usage() {
   echo "  -p, --password PASS   Database password"
   echo "  -d, --database NAME   Database name (required)"
   echo "  -h, --host HOST       Database host (default: local socket)"
-  echo "  -m, --max-packet SIZE Max allowed packet size in bytes (default: 2073741824)"
+  echo "  -m, --max-packet SIZE Max allowed packet size in bytes (default: 2147483648)"
   echo "  -s, --sleep SECONDS   Sleep time between chunks in seconds (default: 3)"
   echo "  --path DIRECTORY      Directory containing chunk files (default: ./chunks)"
   echo "  --dry-run             Show what would be imported without actually importing"
