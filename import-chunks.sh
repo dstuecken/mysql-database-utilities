@@ -22,7 +22,7 @@ usage() {
   echo "  -t, --to NUMBER       Stop importing at chunk number (default: all chunks)"
   echo "  -u, --user USERNAME   Database username (default: root)"
   echo "  -p, --password PASS   Database password"
-  echo "  -d, --database NAME   Database name (default: )"
+  echo "  -d, --database NAME   Database name (required)"
   echo "  -h, --host HOST       Database host (default: local socket)"
   echo "  -m, --max-packet SIZE Max allowed packet size in bytes (default: 2073741824)"
   echo "  -s, --sleep SECONDS   Sleep time between chunks in seconds (default: 3)"
