@@ -6,7 +6,7 @@ A collection of bash scripts for efficiently exporting, chunking, and importing 
 This toolkit provides three main utilities:
 1. **export-database.sh** - Export MySQL databases with optimized settings, now with additional MySQL configuration options
 2. **chunk-large-export.sh** - Split large SQL dump files into manageable chunks
-3. **import-chunks.sh** - Import chunked SQL files with memory-efficient settings1.
+3. **import-chunks.sh** - Import chunked SQL files with memory-efficient settings.
 4. **remove-super-statements-from-chunks.sh** - Process SQL chunk files to remove statements requiring SUPER privileges
 
 These scripts are particularly valuable when working with large databases that may cause memory issues or timeouts during standard import/export operations.
