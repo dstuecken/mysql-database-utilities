@@ -25,7 +25,7 @@ chmod +x import-chunks.sh
 
 ## Usage
 ### Export Database
-The `export-database.sh` script allows you to export one or more MySQL databases with optimized settings for performance and reliability. The script now includes enhanced MySQL options to improve flexibility.
+The `export-database.sh` script allows you to export one or more MySQL databases with optimized settings for performance and reliability.
 
 ```bash
 ./export-database.sh -u username -w password -d database1,database2 -f export_file.sql
