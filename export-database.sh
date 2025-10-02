@@ -185,6 +185,7 @@ for db in "${DB_ARRAY[@]}"; do
 
   if [ "$DATA_ONLY" = true ]; then
     cmd+=("--no-create-info")
+    cmd+=("--skip-triggers")
   fi
 
   if [ "$REPLACE_INTO" = true ]; then
