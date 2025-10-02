@@ -14,7 +14,7 @@ SHOW_PROGRESS=true  # Whether to show progress information
 DISABLE_KEYS=true  # Whether to disable keys during import
 FORCE=false  # Force import even if database exists
 IGNORE_ERRORS=false  # Continue importing even when errors occur
-USE_MYSQL_PASS_FILE=false
+USE_MYSQL_PASS_FILE=true
 
 # Convert human-readable sizes to bytes
 convert_to_bytes() {
@@ -116,6 +116,9 @@ if [ -n "$DB_PASS" ] && [ "$USE_MYSQL_PASS_FILE" = true ]; then
   MYSQL_PASS_FILE=$(mktemp)
   echo "[client]" > "$MYSQL_PASS_FILE"
   echo "password=$DB_PASS" >> "$MYSQL_PASS_FILE"
+  echo "port=$DB_PORT" >> "$MYSQL_PASS_FILE"
+  echo "host=$DB_HOST" >> "$MYSQL_PASS_FILE"
+  echo "user=$DB_USERNAME" >> "$MYSQL_PASS_FILE"
   chmod 600 "$MYSQL_PASS_FILE"  # Set proper permissions
 fi
 
@@ -159,8 +162,18 @@ run_mysql_command() {
   fi
 }
 
+# Test database connection and credentials
+echo "Testing database connection and credentials..."
+if ! run_mysql_command "" -e "SELECT 1;" >/dev/null 2>&1; then
+  echo "Error: Unable to connect to MySQL server with the provided credentials."
+  echo "Please check your username, password, host, and port settings."
+  cleanup_pass_file
+  exit 1
+fi
+echo "✅ Database connection successful"
+
 if [ -n "$DB_HOST" ]; then
-  CONNECTION_DESC="host '$DB_HOST'"
+  CONNECTION_DESC="host '$DB_HOST' port '$DB_PORT'"
 else
   CONNECTION_DESC="local socket"
 fi
@@ -340,8 +353,6 @@ if [ "$DISABLE_KEYS" = true ] && [ "$DB_EXISTS" -gt 0 ] && [ "$CAN_ALTER" -gt 0 
   done
 fi
 
-cleanup_pass_file
-
 # Report on import result
 if [ $IMPORT_STATUS -eq 0 ]; then
   echo "Import completed successfully!"
@@ -355,5 +366,7 @@ if [ "$CAN_MODIFY_GLOBALS" = true ]; then
   echo "Resetting MySQL optimization settings..."
   run_mysql_command "" -e "FLUSH TABLES;" || echo "Warning: Could not flush tables"
 fi
+
+cleanup_pass_file
 
 echo "Done."
