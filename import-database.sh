@@ -11,7 +11,7 @@ INPUT_FILE=""  # SQL file to import
 MAX_ALLOWED_PACKET="1073741824"  # 1GB in bytes
 NET_BUFFER_LENGTH="16384"  # Network buffer length
 SHOW_PROGRESS=true  # Whether to show progress information
-DISABLE_KEYS=true  # Whether to disable keys during import
+DISABLE_KEYS=false  # Whether to disable keys during import
 FORCE=false  # Force import even if database exists
 IGNORE_ERRORS=false  # Continue importing even when errors occur
 USE_MYSQL_PASS_FILE=true
@@ -118,7 +118,7 @@ if [ -n "$DB_PASS" ] && [ "$USE_MYSQL_PASS_FILE" = true ]; then
   echo "password=$DB_PASS" >> "$MYSQL_PASS_FILE"
   echo "port=$DB_PORT" >> "$MYSQL_PASS_FILE"
   echo "host=$DB_HOST" >> "$MYSQL_PASS_FILE"
-  echo "user=$DB_USERNAME" >> "$MYSQL_PASS_FILE"
+  echo "user=$DB_USER" >> "$MYSQL_PASS_FILE"
   chmod 600 "$MYSQL_PASS_FILE"  # Set proper permissions
 fi
 
@@ -129,7 +129,7 @@ run_mysql_command() {
 
   # Add password file as first argument if password is provided
   if [ -n "$MYSQL_PASS_FILE" ]; then
-    cmd+=("--defaults-extra-file=$MYSQL_PASS_FILE")
+    cmd+=("--defaults-extra-file=$MYSQL_PASS_FILE ")
   fi
 
   # Add other MySQL options
@@ -156,10 +156,52 @@ run_mysql_command() {
 
   # Execute the command with the database if provided
   if [ -n "$db_arg" ]; then
+    echo mysql "${cmd[@]}" "$db_arg"
     mysql "${cmd[@]}" "$db_arg"
   else
     mysql "${cmd[@]}"
   fi
+}
+
+# Build MySQL import command function
+run_mysql_import() {
+  local cmd=()
+
+  # Add password file as first argument if password is provided
+  if [ -n "$MYSQL_PASS_FILE" ]; then
+    cmd+=(" --defaults-extra-file=$MYSQL_PASS_FILE")
+  else
+    cmd+=(" -p$DB_PASS")
+  fi
+
+  # Add other MySQL options
+  cmd+=(" -u$DB_USER")
+
+  if [ -n "$DB_HOST" ]; then
+    cmd+=(" -h$DB_HOST")
+  fi
+
+  # Add max_allowed_packet directly to command line if we have SUPER privileges
+  if [ "$CAN_MODIFY_GLOBALS" = true ]; then
+    cmd+=(" --max_allowed_packet=$MAX_ALLOWED_PACKET")
+    cmd+=(" --net_buffer_length=$NET_BUFFER_LENGTH")
+  fi
+
+  if [ "$IGNORE_ERRORS" = true ]; then
+    cmd+=(" --force")
+    echo "Note: --ignore-errors option is enabled. MySQL will continue on errors."
+  fi
+
+
+  if [ "$SHOW_PROGRESS" = false ]; then
+    cmd+=(" --silent")
+  fi
+
+  # Finally add the database name
+  cmd+=("$DB_NAME")
+
+  # Execute the command
+  mysql "${cmd[@]}"
 }
 
 # Test database connection and credentials
@@ -246,6 +288,7 @@ if [ "$DISABLE_KEYS" = true ] && [ "$DB_EXISTS" -gt 0 ]; then
   if [ "$CAN_ALTER" -gt 0 ]; then
     echo "Disabling keys on existing tables..."
     TABLES=$(run_mysql_command "$DB_NAME" -e "SHOW TABLES\G" | grep -v "Tables_in" | grep -v "row" | tr -d ' ' | tr -d '*')
+
     for TABLE in $TABLES; do
       run_mysql_command "$DB_NAME" -e "ALTER TABLE \`$TABLE\` DISABLE KEYS;" || echo "Warning: Could not disable keys for table $TABLE"
     done
